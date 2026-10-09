@@ -150,28 +150,41 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
 
         private Boolean _atScreenEdge;
 
-        // Virtual desktop bounds, cached because MouseMoved fires constantly and
-        // this must stay cheap. Re-read periodically so docking, undocking or a
-        // resolution change is picked up without needing a display-change hook.
-        private Int32 _screenLeft;
-        private Int32 _screenTop;
-        private Int32 _screenRight;
-        private Int32 _screenBottom;
-        private Int64 _virtualScreenReadMs;
-        private const Int64 VirtualScreenTtlMs = 5000;
+        /// <summary>How far past an edge to look for another display.</summary>
+        private const Int32 EdgeProbePx = 2;
 
-        // Read via GetSystemMetrics rather than WinForms' SystemInformation: the
-        // plugin assembly must not reference System.Windows.Forms. The Logi
-        // plugin verifier cannot resolve desktop framework assemblies, so a
-        // WinForms reference here fails packaging - which is why the settings
-        // window is a separate executable.
+        // EVERY display, not their union - see AtWall. Cached because MouseMoved
+        // fires constantly and this must stay cheap; re-read periodically so
+        // docking, undocking or a resolution change is picked up without needing
+        // a display-change hook.
+        private DisplayRect[] _displays = Array.Empty<DisplayRect>();
+        private Int64 _displaysReadMs;
+        private const Int64 DisplaysTtlMs = 5000;
+
+        /// <summary>A display's bounds. Right and Bottom are exclusive, as Win32 gives them.</summary>
+        [StructLayout(LayoutKind.Sequential)]
+        private struct DisplayRect
+        {
+            public Int32 Left;
+            public Int32 Top;
+            public Int32 Right;
+            public Int32 Bottom;
+        }
+
+        private delegate Boolean MonitorEnumProc(IntPtr monitor, IntPtr deviceContext, ref DisplayRect bounds, IntPtr data);
+
+        // Plain user32 rather than WinForms' Screen class: the plugin assembly must
+        // not reference System.Windows.Forms. The Logi plugin verifier cannot
+        // resolve desktop framework assemblies, so a WinForms reference here fails
+        // packaging - which is why the settings window is a separate executable.
         [DllImport("user32.dll")]
-        private static extern Int32 GetSystemMetrics(Int32 index);
+        private static extern Boolean EnumDisplayMonitors(
+            IntPtr deviceContext, IntPtr clip, MonitorEnumProc callback, IntPtr data);
 
-        private const Int32 SM_XVIRTUALSCREEN = 76;
-        private const Int32 SM_YVIRTUALSCREEN = 77;
-        private const Int32 SM_CXVIRTUALSCREEN = 78;
-        private const Int32 SM_CYVIRTUALSCREEN = 79;
+        [DllImport("user32.dll")]
+        private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+
+        private static readonly IntPtr PerMonitorAwareV2 = new(-4);
 
         public String Name => "Mouse";
 
@@ -338,16 +351,18 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                 return;
             }
 
-            this.RefreshVirtualScreen();
+            this.RefreshDisplays();
 
-            // Bounds are exclusive on the right/bottom, so the last addressable
-            // pixel is one less than the edge.
-            var atEdge = e.Data.X <= this._screenLeft
-                      || e.Data.Y <= this._screenTop
-                      || e.Data.X >= this._screenRight - 1
-                      || e.Data.Y >= this._screenBottom - 1;
+            // A low-level hook reports where the cursor is TRYING to go, which can
+            // lie past the edge it is being held against. Pull the point back onto
+            // the nearest display first, or pushing into a wall would read as
+            // being on no display at all.
+            if (!this.TryNearestDisplay(e.Data.X, e.Data.Y, out var display, out var x, out var y))
+            {
+                return;
+            }
 
-            if (atEdge)
+            if (this.AtWall(display, x, y, tolerance: 0))
             {
                 if (!this._atScreenEdge)
                 {
@@ -360,36 +375,157 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
 
             // Re-arm only after a clear retreat, so resting against the edge does
             // not machine-gun on sub-pixel jitter.
-            if (this._atScreenEdge
-                && e.Data.X > this._screenLeft + ScreenEdgeReleasePx
-                && e.Data.Y > this._screenTop + ScreenEdgeReleasePx
-                && e.Data.X < this._screenRight - 1 - ScreenEdgeReleasePx
-                && e.Data.Y < this._screenBottom - 1 - ScreenEdgeReleasePx)
+            if (this._atScreenEdge && !this.AtWall(display, x, y, ScreenEdgeReleasePx))
             {
                 this._atScreenEdge = false;
             }
         }
 
-        /// <summary>Refreshes the cached virtual desktop bounds if they are stale.</summary>
+        /// <summary>
+        /// Whether the cursor is against an edge it genuinely cannot cross.
+        /// </summary>
         /// <remarks>
-        /// The VIRTUAL screen, not a single display: with multiple monitors the
-        /// cursor crosses between them freely, and only the outer boundary of the
-        /// whole arrangement is a real wall the cursor cannot pass.
+        /// The bounding box of all displays is the WRONG model, and this used to
+        /// use it. Put a small monitor beside a tall one and the union is taller
+        /// than the small one: while the cursor is on the small monitor it can
+        /// never reach the union's top or bottom, because those y-coordinates only
+        /// exist on the display next door. Those edges simply never fired.
+        ///
+        /// A union also cannot tell a wall from the seam between two monitors,
+        /// where the cursor passes straight through and a haptic would be wrong.
+        ///
+        /// So the question is asked per edge of the display the cursor is actually
+        /// on: is there another display just beyond it? If not, it is a wall. The
+        /// same model, for the same reason, as MacMouseInputSource.AtWall - macOS
+        /// got it first only because that is where the flaw was noticed.
         /// </remarks>
-        private void RefreshVirtualScreen()
+        private Boolean AtWall(DisplayRect d, Int32 x, Int32 y, Int32 tolerance)
+        {
+            if (x <= d.Left + tolerance && !this.AnyDisplayContains(d.Left - EdgeProbePx, y))
+            {
+                return true;
+            }
+
+            // Right and Bottom are exclusive, so the last addressable pixel is one
+            // less than the edge.
+            if (x >= d.Right - 1 - tolerance && !this.AnyDisplayContains(d.Right - 1 + EdgeProbePx, y))
+            {
+                return true;
+            }
+
+            if (y <= d.Top + tolerance && !this.AnyDisplayContains(x, d.Top - EdgeProbePx))
+            {
+                return true;
+            }
+
+            return y >= d.Bottom - 1 - tolerance && !this.AnyDisplayContains(x, d.Bottom - 1 + EdgeProbePx);
+        }
+
+        private Boolean AnyDisplayContains(Int32 x, Int32 y)
+        {
+            foreach (var d in this._displays)
+            {
+                if (x >= d.Left && x < d.Right && y >= d.Top && y < d.Bottom)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Finds the display a point belongs to, clamping the point onto it.
+        /// </summary>
+        private Boolean TryNearestDisplay(
+            Int32 rawX, Int32 rawY, out DisplayRect display, out Int32 x, out Int32 y)
+        {
+            display = default;
+            x = rawX;
+            y = rawY;
+
+            var best = Int64.MaxValue;
+
+            foreach (var d in this._displays)
+            {
+                var clampedX = Math.Clamp(rawX, d.Left, d.Right - 1);
+                var clampedY = Math.Clamp(rawY, d.Top, d.Bottom - 1);
+
+                Int64 dx = rawX - clampedX;
+                Int64 dy = rawY - clampedY;
+
+                var distance = (dx * dx) + (dy * dy);
+
+                if (distance < best)
+                {
+                    best = distance;
+                    display = d;
+                    x = clampedX;
+                    y = clampedY;
+                }
+            }
+
+            return best != Int64.MaxValue;
+        }
+
+        /// <summary>Refreshes the cached bounds of every display if they are stale.</summary>
+        private void RefreshDisplays()
         {
             var now = Environment.TickCount64;
 
-            if (this._screenRight != 0 && (now - this._virtualScreenReadMs) <= VirtualScreenTtlMs)
+            if (this._displays.Length > 0 && (now - this._displaysReadMs) <= DisplaysTtlMs)
             {
                 return;
             }
 
-            this._screenLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
-            this._screenTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            this._screenRight = this._screenLeft + GetSystemMetrics(SM_CXVIRTUALSCREEN);
-            this._screenBottom = this._screenTop + GetSystemMetrics(SM_CYVIRTUALSCREEN);
-            this._virtualScreenReadMs = now;
+            this._displaysReadMs = now;
+
+            var found = new List<DisplayRect>();
+
+            MonitorEnumProc collect = (IntPtr _, IntPtr _, ref DisplayRect bounds, IntPtr _) =>
+            {
+                found.Add(bounds);
+                return true;
+            };
+
+            // The hook delivers PHYSICAL pixels whatever the host process's DPI
+            // awareness is, while display bounds are scaled to match the calling
+            // thread's. If the Plugin Service were not per-monitor aware, the two
+            // would disagree on any scaled display and edges would fire in the
+            // middle of the screen. Asking in per-monitor mode for the length of
+            // this one call makes both sides speak physical pixels.
+            var previous = IntPtr.Zero;
+
+            try
+            {
+                previous = SetThreadDpiAwarenessContext(PerMonitorAwareV2);
+            }
+            catch (EntryPointNotFoundException)
+            {
+                // Before Windows 10 1607. Bounds come back in whatever the process
+                // already uses, which is what this code relied on previously.
+            }
+
+            try
+            {
+                EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, collect, IntPtr.Zero);
+            }
+            finally
+            {
+                if (previous != IntPtr.Zero)
+                {
+                    SetThreadDpiAwarenessContext(previous);
+                }
+
+                // The callback is only ever invoked during the call above, but the
+                // delegate must outlive it as far as the GC is concerned.
+                GC.KeepAlive(collect);
+            }
+
+            if (found.Count > 0)
+            {
+                this._displays = found.ToArray();
+            }
         }
 
         private void OnMouseWheel(Object sender, MouseWheelHookEventArgs e)
