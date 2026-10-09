@@ -549,13 +549,42 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                 $"[ThrumHaptics] wheel dir={e.Data.Direction} type={e.Data.Type} " +
                 $"rotation={e.Data.Rotation} delta={e.Data.Delta}");
 
-            if (e.Data.Direction == MouseWheelScrollDirection.Horizontal)
+            var horizontal = e.Data.Direction == MouseWheelScrollDirection.Horizontal;
+            var rotation = e.Data.Rotation;
+
+            // Judged HERE, before any rotation is counted, and not left to Fire.
+            // Both wheels pace themselves by accumulating rotation, and those
+            // counters belong to the MX Master. Letting another mouse's scrolling
+            // into them and refusing it only at the end meant its rotation had
+            // already been banked - so the next few MX Master events tipped a
+            // counter that somebody else had filled, and buzzed on its behalf.
+            if (this._deviceAllowsHaptics != null && !this._deviceAllowsHaptics())
             {
-                this.FireThumbWheel(e.Data.Rotation);
+                this.LookAgainOnceTheDeviceIsKnown(() => this.CountWheel(horizontal, rotation));
                 return;
             }
 
-            this.FireVerticalWheel(e.Data.Rotation);
+            this.CountWheel(horizontal, rotation);
+        }
+
+        private readonly Object _wheelGate = new();
+
+        /// <summary>Adds one wheel event's rotation to the right counter.</summary>
+        private void CountWheel(Boolean horizontal, Int32 rotation)
+        {
+            // Locked because a second look arrives on a pool thread while the hook
+            // thread may be counting too.
+            lock (this._wheelGate)
+            {
+                if (horizontal)
+                {
+                    this.FireThumbWheel(rotation);
+                }
+                else
+                {
+                    this.FireVerticalWheel(rotation);
+                }
+            }
         }
 
         /// <summary>
@@ -664,7 +693,7 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
             // so no path to the motor can forget it.
             if (this._deviceAllowsHaptics != null && !this._deviceAllowsHaptics())
             {
-                this.LookAgainOnceTheDeviceIsKnown(eventId, cooldownMs);
+                this.LookAgainOnceTheDeviceIsKnown(() => this.Play(eventId, cooldownMs));
                 return;
             }
 
@@ -695,7 +724,7 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
         /// held-back events a second, and each queueing its own timer would be a
         /// lot of work to conclude "still the other mouse".
         /// </remarks>
-        private void LookAgainOnceTheDeviceIsKnown(String eventId, Int64 cooldownMs)
+        private void LookAgainOnceTheDeviceIsKnown(Action whenAllowed)
         {
             if (Interlocked.CompareExchange(ref this._secondLookPending, 1, 0) != 0)
             {
@@ -710,12 +739,12 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                 {
                     if (!this._disposed && this._deviceAllowsHaptics())
                     {
-                        this.Play(eventId, cooldownMs);
+                        whenAllowed();
                     }
                 }
                 catch (Exception ex)
                 {
-                    PluginLog.Error($"[ThrumHaptics] Second look at '{eventId}' failed: {ex.Message}");
+                    PluginLog.Error($"[ThrumHaptics] Second look failed: {ex.Message}");
                 }
             });
         }

@@ -91,13 +91,6 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
         private static readonly Regex LogitechVendor =
             new(@"VID(_|&[0-9A-F]{2,4})046D", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
-        // TEMPORARY, for the test build only: log each button and wheel event with
-        // its device. Thumb buttons, the thumb wheel and scrolling under Options+
-        // smooth scrolling have not been observed yet, and whether they arrive
-        // from the mouse itself or as injected input decides how much further this
-        // can go. Remove once that is recorded.
-        private const Boolean LogEvents = true;
-
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct WindowClass
         {
@@ -453,27 +446,87 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
 
             var device = input.Header.Device;
 
-            if (LogEvents && input.Mouse.ButtonFlags != 0)
-            {
-                PluginLog.Info(
-                    $"{Tag} event dev=0x{device.ToInt64():X} flags=0x{input.Mouse.ButtonFlags:X4} "
-                    + $"data={unchecked((Int16)input.Mouse.ButtonData)}");
-            }
+            var flags = input.Mouse.ButtonFlags;
+            var now = Environment.TickCount64;
 
             Source source;
 
-            if (device == IntPtr.Zero)
+            if (device != IntPtr.Zero)
             {
-                // No device: the input was injected rather than produced by
-                // hardware. Touch and pen arrive this way too, and they are not the
-                // MX Master; Windows stamps those with a signature of their own.
-                source = (input.Mouse.ExtraInformation & TouchOrPenMask) == TouchOrPenSignature
-                    ? Source.Other
-                    : Source.Injected;
+                source = this.IsLogitech(device) ? Source.Logitech : Source.Other;
+
+                // A lone movement report from another mouse is not somebody using
+                // it. MEASURED: an idle second mouse sent one to four stray reports
+                // a second while only the MX Master was in use. Clicks and wheel
+                // turns are deliberate and count at once; movement has to keep
+                // coming, which real use does within a few hundredths of a second.
+                //
+                // This matters more than it looks. The thumb wheel cannot answer
+                // back for a quarter of a second after another device speaks, so
+                // every stray report would cost it a tick.
+                if (source == Source.Other && flags == 0)
+                {
+                    this._otherMoveStreak = (now - this._otherMoveLastMs) <= OtherMoveWindowMs
+                        ? this._otherMoveStreak + 1
+                        : 1;
+
+                    this._otherMoveLastMs = now;
+
+                    if (this._otherMoveStreak < OtherMovesToCount)
+                    {
+                        return;
+                    }
+                }
+            }
+            else if ((input.Mouse.ExtraInformation & TouchOrPenMask) == TouchOrPenSignature)
+            {
+                // Touch and pen reach Windows as injected mouse input too, and they
+                // are not the MX Master. Windows stamps them with a signature.
+                source = Source.Other;
+            }
+            else if ((flags & WheelFlags) != 0)
+            {
+                // An injected WHEEL event. MEASURED: this is the only form the
+                // MX Master's thumb wheel ever takes - it produces no hardware
+                // event at all - so it has to be able to speak for the mouse.
+                //
+                // But it cannot always. With smooth scrolling on, Options+ keeps
+                // posting these for about a second after the wheel has stopped -
+                // the glide - and a glide answering "Logitech" on every frame let
+                // another mouse's scrolling buzz for as long as it lasted.
+                //
+                // What separates the two is whether the OTHER device is still in
+                // use. Someone who has moved to it is touching it now; someone
+                // rolling the MX Master's wheel has let go of it, and a hand takes
+                // longer than this to change mice. So a wheel frame speaks for the
+                // MX Master only once the other device has gone quiet.
+                //
+                // Judging a stream once at its start was tried first and was worse:
+                // a second roll runs straight into the glide of the first, there is
+                // no start to see, and the thumb wheel stayed mute until the mouse
+                // was moved.
+                if ((now - this._lastOtherDeviceMs) <= OtherDeviceQuietMs)
+                {
+                    return;
+                }
+
+                source = Source.Injected;
+            }
+            else if (flags != 0)
+            {
+                // An injected BUTTON: the MX Master's back and forward, which
+                // Options+ posts on its behalf. A press is deliberate and has no
+                // tail, so it always counts.
+                source = Source.Injected;
             }
             else
             {
-                source = this.IsLogitech(device) ? Source.Logitech : Source.Other;
+                return; // Injected movement says nothing about who is scrolling or clicking.
+            }
+
+            if (source == Source.Other)
+            {
+                this._lastOtherDeviceMs = now;
             }
 
             var previous = (Source)this._lastSource;
@@ -499,6 +552,28 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
         // synthesised from a touch or a pen stroke.
         private const UInt32 TouchOrPenMask = 0xFFFFFF00;
         private const UInt32 TouchOrPenSignature = 0xFF515700;
+
+        // RI_MOUSE_WHEEL | RI_MOUSE_HWHEEL.
+        private const UInt16 WheelFlags = 0x0400 | 0x0800;
+
+        /// <summary>How long another device must be silent before injected scrolling counts.</summary>
+        /// <remarks>
+        /// Long enough to outlast the gaps inside ordinary use of another mouse -
+        /// movement reports arrive every few milliseconds, wheel notches within a
+        /// couple of hundred - and shorter than it takes a hand to leave one mouse
+        /// and start rolling a wheel on another.
+        /// </remarks>
+        private const Int64 OtherDeviceQuietMs = 250;
+
+        private Int64 _lastOtherDeviceMs;
+
+        // Movement from another device counts once this many reports arrive close
+        // together. A mouse in use sends over a hundred a second.
+        private const Int32 OtherMovesToCount = 3;
+        private const Int64 OtherMoveWindowMs = 250;
+
+        private Int32 _otherMoveStreak;
+        private Int64 _otherMoveLastMs;
 
         /// <summary>Whether a device is a Logitech pointer, resolved once per device.</summary>
         private Boolean IsLogitech(IntPtr device)
