@@ -17,11 +17,11 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
     /// API that tags each event with the device it came from.
     ///
     /// This does NOT replace the hook. It runs beside it and answers one question -
-    /// was the last hardware input from a Logitech pointer? - which the hook's
-    /// input source consults before it plays anything. Keeping the hook as the
-    /// source of events means everything it already gets right stays right:
-    /// thumb buttons, the detent counting that survives Options+ smooth scrolling,
-    /// cursor position for screen edges.
+    /// where did the most recent mouse input come from? - which the hook's input
+    /// source consults before it plays anything. Keeping the hook as the source of
+    /// events means everything it already gets right stays right: thumb buttons,
+    /// the detent counting that survives Options+ smooth scrolling, cursor
+    /// position for screen edges.
     ///
     /// MEASURED on device, with Logi Options+ running:
     ///
@@ -34,14 +34,29 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
     ///   - Another vendor's mouse can show up as TWO devices: the physical one for
     ///     movement, and a virtual one its driver re-posts clicks and wheel
     ///     through. Neither carries Logitech's vendor id, so both are ignored.
+    ///   - The MX Master's BACK AND FORWARD buttons arrive with NO device at all.
+    ///     Options+ injects them, on Windows just as it converts them on macOS.
     ///
-    /// FAILS OPEN. If this cannot start, or has seen no hardware yet, haptics are
+    /// That last one decides the model. The first version judged injected input by
+    /// whichever real device had been used before it, which sounds reasonable and
+    /// failed at once: after touching the other mouse, the thumb buttons had no
+    /// hardware event of their own to win the answer back, so press after press
+    /// was dropped until the MX Master happened to move. So every event is judged
+    /// on what it is, not on what came before: Logitech hardware and injected
+    /// input drive haptics, other hardware does not.
+    ///
+    /// Injected input is allowed rather than refused because the thing injecting
+    /// mouse input on this machine is overwhelmingly Options+, acting for the very
+    /// mouse we want. Touch and pen are the exception - Windows turns those into
+    /// injected mouse input too - and they carry a signature that marks them out.
+    ///
+    /// FAILS OPEN. If this cannot start, or has seen nothing yet, haptics are
     /// allowed exactly as before. A filter that falls silent when it is unsure
     /// would turn a diagnostics problem into a plugin that appears dead.
     ///
-    /// The one imprecision: the hook and Raw Input arrive on different threads, so
-    /// the very first event after switching devices can be judged by the device
-    /// used a moment earlier. One haptic, at the instant of the switch.
+    /// The hook and Raw Input hear about one physical event on two threads, in no
+    /// guaranteed order. MouseInputSource covers that from its side by giving a
+    /// haptic it was about to drop a second look a moment later.
     /// </remarks>
     internal sealed class RawInputDeviceTracker : IInputSource
     {
@@ -216,11 +231,21 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
         // Only ever touched on the tracker's own thread.
         private readonly Dictionary<IntPtr, Boolean> _isLogitechByDevice = new();
         private IntPtr _lastDevice;
+        private Boolean _lastDeviceIsLogitech;
 
-        // Written on the tracker thread, read on the hook's.
+        /// <summary>Where a mouse event came from.</summary>
+        private enum Source
+        {
+            Nothing,
+            Logitech,
+            Injected,
+            Other,
+        }
+
+        // Written on the tracker thread, read on the hook's. An Int32 rather than
+        // the enum itself only because that is what `volatile` accepts.
         private volatile Boolean _listening;
-        private volatile Boolean _seenHardware;
-        private volatile Boolean _lastHardwareIsLogitech;
+        private volatile Int32 _lastSource = (Int32)Source.Nothing;
 
         public String Name => "Device tracker (Raw Input)";
 
@@ -228,15 +253,11 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
         /// Whether a haptic should play for input arriving now.
         /// </summary>
         /// <remarks>
-        /// True unless this is running, has seen real hardware, AND the most recent
-        /// of it was not a Logitech pointer. Every unknown resolves to "allow".
-        ///
-        /// Injected input - which Raw Input reports with no device at all - does not
-        /// move the answer. Options+ injects on the MX Master's behalf, so input
-        /// with no device inherits whichever real device was used last.
+        /// False only when this is running AND the most recent mouse input came from
+        /// hardware that is not Logitech's. Every unknown resolves to "allow".
         /// </remarks>
         public Boolean AllowsHaptics =>
-            !this._listening || !this._seenHardware || this._lastHardwareIsLogitech;
+            !this._listening || this._lastSource != (Int32)Source.Other;
 
         public void Start()
         {
@@ -439,21 +460,55 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                     + $"data={unchecked((Int16)input.Mouse.ButtonData)}");
             }
 
-            // No device means the input was injected rather than produced by
-            // hardware. It says nothing about which device the user is holding.
+            Source source;
+
             if (device == IntPtr.Zero)
             {
-                return;
+                // No device: the input was injected rather than produced by
+                // hardware. Touch and pen arrive this way too, and they are not the
+                // MX Master; Windows stamps those with a signature of their own.
+                source = (input.Mouse.ExtraInformation & TouchOrPenMask) == TouchOrPenSignature
+                    ? Source.Other
+                    : Source.Injected;
+            }
+            else
+            {
+                source = this.IsLogitech(device) ? Source.Logitech : Source.Other;
             }
 
-            // This runs for every mouse movement, hundreds of times a second, so the
-            // common case - same device as last time - must cost one comparison.
-            if (device == this._lastDevice)
+            var previous = (Source)this._lastSource;
+
+            if (source == previous)
             {
                 return;
             }
 
-            this._lastDevice = device;
+            this._lastSource = (Int32)source;
+
+            // Logged only when the ANSWER changes, which is rare, and not on every
+            // hop between the mouse and its own injected buttons, which is not.
+            if ((previous == Source.Other) != (source == Source.Other))
+            {
+                PluginLog.Info(
+                    $"{Tag} input now from "
+                    + (source == Source.Other ? "another device; haptics paused." : "the Logitech pointer; haptics on."));
+            }
+        }
+
+        // What Windows writes into the extra-information field of mouse input it
+        // synthesised from a touch or a pen stroke.
+        private const UInt32 TouchOrPenMask = 0xFFFFFF00;
+        private const UInt32 TouchOrPenSignature = 0xFF515700;
+
+        /// <summary>Whether a device is a Logitech pointer, resolved once per device.</summary>
+        private Boolean IsLogitech(IntPtr device)
+        {
+            // This runs for every mouse movement, hundreds of times a second, so the
+            // common case - same device as last time - costs one comparison.
+            if (device == this._lastDevice)
+            {
+                return this._lastDeviceIsLogitech;
+            }
 
             if (!this._isLogitechByDevice.TryGetValue(device, out var isLogitech))
             {
@@ -469,8 +524,10 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                     + (name.Length == 0 ? "(name unavailable)" : name));
             }
 
-            this._lastHardwareIsLogitech = isLogitech;
-            this._seenHardware = true;
+            this._lastDevice = device;
+            this._lastDeviceIsLogitech = isLogitech;
+
+            return isLogitech;
         }
 
         private static String DeviceName(IntPtr device)

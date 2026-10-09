@@ -664,9 +664,67 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
             // so no path to the motor can forget it.
             if (this._deviceAllowsHaptics != null && !this._deviceAllowsHaptics())
             {
+                this.LookAgainOnceTheDeviceIsKnown(eventId, cooldownMs);
                 return;
             }
 
+            this.Play(eventId, cooldownMs);
+        }
+
+        /// <summary>How long to wait before judging a held-back haptic a second time.</summary>
+        private const Int32 DeviceSettleMs = 8;
+
+        private Int32 _secondLookPending;
+
+        /// <summary>
+        /// Gives a held-back haptic one more chance, a moment later.
+        /// </summary>
+        /// <remarks>
+        /// The hook and the device tracker hear about the same physical event on
+        /// two different threads, in no guaranteed order. So when this is reached,
+        /// "the wrong device" can simply mean the tracker has not caught up yet -
+        /// and that is exactly the case at the moment of switching back to the
+        /// MX Master, where on device it cost the first click its haptic.
+        ///
+        /// Only a haptic that was about to be DROPPED waits. Everything the tracker
+        /// already allows plays at once, so ordinary use pays nothing for this; the
+        /// cost is one haptic arriving a hundredth of a second late, once, at the
+        /// instant of changing device.
+        ///
+        /// One look at a time: someone scrolling the other mouse sends a hundred
+        /// held-back events a second, and each queueing its own timer would be a
+        /// lot of work to conclude "still the other mouse".
+        /// </remarks>
+        private void LookAgainOnceTheDeviceIsKnown(String eventId, Int64 cooldownMs)
+        {
+            if (Interlocked.CompareExchange(ref this._secondLookPending, 1, 0) != 0)
+            {
+                return;
+            }
+
+            Task.Delay(DeviceSettleMs).ContinueWith(_ =>
+            {
+                Interlocked.Exchange(ref this._secondLookPending, 0);
+
+                try
+                {
+                    if (!this._disposed && this._deviceAllowsHaptics())
+                    {
+                        this.Play(eventId, cooldownMs);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    PluginLog.Error($"[ThrumHaptics] Second look at '{eventId}' failed: {ex.Message}");
+                }
+            });
+        }
+
+        private readonly Object _playGate = new();
+
+        /// <summary>Applies the rate limit and plays. Callable from any thread.</summary>
+        private void Play(String eventId, Int64 cooldownMs)
+        {
             if (cooldownMs > 0)
             {
                 // Cooldown is tracked PER EVENT, so scrolling the main wheel never
@@ -676,12 +734,17 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                 // be cheap and monotonic - DateTime jumps when the clock changes.
                 var now = Environment.TickCount64;
 
-                if (this._lastFiredMs.TryGetValue(eventId, out var last) && (now - last) < cooldownMs)
+                // Locked because a second look arrives on a pool thread while the
+                // hook thread may be in here too, and Dictionary tolerates neither.
+                lock (this._playGate)
                 {
-                    return;
-                }
+                    if (this._lastFiredMs.TryGetValue(eventId, out var last) && (now - last) < cooldownMs)
+                    {
+                        return;
+                    }
 
-                this._lastFiredMs[eventId] = now;
+                    this._lastFiredMs[eventId] = now;
+                }
             }
 
             var waveform = this._settings.WaveformFor(eventId);
