@@ -4,40 +4,48 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
     using System.Collections.Generic;
     using System.Runtime.InteropServices;
     using System.Text;
+    using System.Text.RegularExpressions;
     using System.Threading;
 
     /// <summary>
-    /// SPIKE - logs Windows Raw Input for the mouse and does nothing else.
+    /// Knows which pointing device the user is currently using, on Windows.
     /// </summary>
     /// <remarks>
-    /// Not a feature. It fires no haptics and changes no behaviour; it exists to
-    /// answer whether per-device filtering is possible at all before anything is
-    /// built on the assumption that it is.
+    /// The low-level hook that drives haptics delivers input already merged across
+    /// every pointing device, so a second mouse or a trackpad used to buzz the
+    /// MX Master as readily as the MX Master itself. Raw Input is the one Windows
+    /// API that tags each event with the device it came from.
     ///
-    /// The low-level hook the plugin uses today delivers input already merged
-    /// across every pointing device, so a trackpad or a second mouse drives the
-    /// motor too. Raw Input is the one Windows API that tags each event with the
-    /// device it came from. Three things have to be true for it to be usable, and
-    /// none of them is known:
+    /// This does NOT replace the hook. It runs beside it and answers one question -
+    /// was the last hardware input from a Logitech pointer? - which the hook's
+    /// input source consults before it plays anything. Keeping the hook as the
+    /// source of events means everything it already gets right stays right:
+    /// thumb buttons, the detent counting that survives Options+ smooth scrolling,
+    /// cursor position for screen edges.
     ///
-    ///   1. The MX Master's events arrive with a device handle that tells it apart
-    ///      from other pointers - while Logi Options+ is running, which is the
-    ///      only condition that matters.
-    ///   2. The physical wheel still arrives when Options+ smooth scrolling is on.
-    ///      That feature replaces the wheel stream the hook sees with an eased
-    ///      animation; injected input reaches Raw Input with a NULL device, so the
-    ///      real detents may be separable here where they are not there.
-    ///   3. Registering does not take input away from the host. A process gets
-    ///      ONE Raw Input target per device class, so if LogiPluginService has
-    ///      already claimed the mouse, claiming it again would silently reroute
-    ///      its input to this window. That is checked first, and this probe
-    ///      stands down rather than find out the hard way.
+    /// MEASURED on device, with Logi Options+ running:
     ///
-    /// Delete this file once the question is answered either way.
+    ///   - The Plugin Service has not registered for mouse Raw Input itself. That
+    ///     matters because a process gets ONE target per device class - claiming
+    ///     it again would silently take the host's input. It is still checked on
+    ///     every start, and this stands down if that ever changes.
+    ///   - An MX Master 4 on Bluetooth reports as VID&amp;02046d, and each of its
+    ///     events arrives within a millisecond or two of the hook's.
+    ///   - Another vendor's mouse can show up as TWO devices: the physical one for
+    ///     movement, and a virtual one its driver re-posts clicks and wheel
+    ///     through. Neither carries Logitech's vendor id, so both are ignored.
+    ///
+    /// FAILS OPEN. If this cannot start, or has seen no hardware yet, haptics are
+    /// allowed exactly as before. A filter that falls silent when it is unsure
+    /// would turn a diagnostics problem into a plugin that appears dead.
+    ///
+    /// The one imprecision: the hook and Raw Input arrive on different threads, so
+    /// the very first event after switching devices can be judged by the device
+    /// used a moment earlier. One haptic, at the instant of the switch.
     /// </remarks>
-    internal sealed class RawInputProbe : IInputSource
+    internal sealed class RawInputDeviceTracker : IInputSource
     {
-        private const String Tag = "[ThrumHaptics][raw]";
+        private const String Tag = "[ThrumHaptics][device]";
 
         private const UInt32 WM_DESTROY = 0x0002;
         private const UInt32 WM_CLOSE = 0x0010;
@@ -56,6 +64,24 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
         private const UInt32 RIM_TYPEMOUSE = 0;
 
         private static readonly IntPtr MessageOnlyParent = new(-3);
+
+        /// <summary>Logitech's USB vendor id, in each form a device path spells it.</summary>
+        /// <remarks>
+        /// USB and receivers write VID_046D; Bluetooth LE writes VID&amp;02046d and
+        /// classic Bluetooth VID&amp;0002046d, the extra digits naming who assigned
+        /// the id. Matching the vendor rather than one product keeps this working
+        /// through a Bolt receiver, whose path carries the RECEIVER's product id
+        /// and not the mouse's.
+        /// </remarks>
+        private static readonly Regex LogitechVendor =
+            new(@"VID(_|&[0-9A-F]{2,4})046D", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        // TEMPORARY, for the test build only: log each button and wheel event with
+        // its device. Thumb buttons, the thumb wheel and scrolling under Options+
+        // smooth scrolling have not been observed yet, and whether they arrive
+        // from the mouse itself or as injected input decides how much further this
+        // can go. Remove once that is recorded.
+        private const Boolean LogEvents = true;
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct WindowClass
@@ -176,7 +202,7 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr GetModuleHandleW(String moduleName);
 
-        private readonly String _className = "ThrumHapticsRawInputProbe." + Guid.NewGuid().ToString("N");
+        private readonly String _className = "ThrumHapticsDeviceTracker." + Guid.NewGuid().ToString("N");
 
         // Held in a field: the window class keeps a raw function pointer the GC
         // knows nothing about, so a local delegate would be collected under it.
@@ -187,11 +213,30 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
         private Boolean _registered;
         private Boolean _disposed;
 
-        private readonly Dictionary<IntPtr, String> _deviceNames = new();
-        private readonly Dictionary<IntPtr, Int32> _movesByDevice = new();
-        private Int64 _movesFlushedMs;
+        // Only ever touched on the tracker's own thread.
+        private readonly Dictionary<IntPtr, Boolean> _isLogitechByDevice = new();
+        private IntPtr _lastDevice;
 
-        public String Name => "Raw Input probe (diagnostic)";
+        // Written on the tracker thread, read on the hook's.
+        private volatile Boolean _listening;
+        private volatile Boolean _seenHardware;
+        private volatile Boolean _lastHardwareIsLogitech;
+
+        public String Name => "Device tracker (Raw Input)";
+
+        /// <summary>
+        /// Whether a haptic should play for input arriving now.
+        /// </summary>
+        /// <remarks>
+        /// True unless this is running, has seen real hardware, AND the most recent
+        /// of it was not a Logitech pointer. Every unknown resolves to "allow".
+        ///
+        /// Injected input - which Raw Input reports with no device at all - does not
+        /// move the answer. Options+ injects on the MX Master's behalf, so input
+        /// with no device inherits whichever real device was used last.
+        /// </remarks>
+        public Boolean AllowsHaptics =>
+            !this._listening || !this._seenHardware || this._lastHardwareIsLogitech;
 
         public void Start()
         {
@@ -205,7 +250,7 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
             this._thread = new Thread(this.Run)
             {
                 IsBackground = true,
-                Name = "ThrumHaptics.RawInputProbe",
+                Name = "ThrumHaptics.DeviceTracker",
             };
 
             this._thread.Start();
@@ -218,9 +263,9 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                 if (HostAlreadyOwnsMouseRawInput())
                 {
                     PluginLog.Info(
-                        $"{Tag} RESULT: the Plugin Service has ALREADY registered for mouse Raw Input. "
-                        + "A process gets one target per device class, so registering here would take its "
-                        + "input away. Probe standing down - Raw Input is not usable in-process.");
+                        $"{Tag} The Plugin Service has registered for mouse Raw Input itself. Registering here "
+                        + "would take its input away, so per-device filtering is OFF and every pointer drives "
+                        + "haptics as before.");
                     return;
                 }
 
@@ -243,7 +288,7 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                 }
 
                 this._window = CreateWindowExW(
-                    0, this._className, "Thrum Haptics Raw Input probe", 0,
+                    0, this._className, "Thrum Haptics device tracker", 0,
                     0, 0, 0, 0, MessageOnlyParent, IntPtr.Zero, instance, IntPtr.Zero);
 
                 if (this._window == IntPtr.Zero)
@@ -270,22 +315,25 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                 }
 
                 this._registered = true;
+                this._listening = true;
 
-                PluginLog.Info($"{Tag} listening. Mouse Raw Input is being LOGGED ONLY - no haptics come from here.");
+                PluginLog.Info($"{Tag} Per-device filtering is ON: only Logitech pointers drive haptics.");
 
                 while (GetMessageW(out var message, IntPtr.Zero, 0, 0) > 0)
                 {
                     DispatchMessageW(ref message);
                 }
-
-                PluginLog.Info($"{Tag} message loop exited.");
             }
             catch (Exception ex)
             {
-                PluginLog.Error($"{Tag} failed: {ex}");
+                PluginLog.Error($"{Tag} failed, so every pointer drives haptics as before: {ex}");
             }
             finally
             {
+                // Before anything else: once this stops listening its last answer
+                // goes stale, and a stale "not Logitech" would silence the plugin.
+                this._listening = false;
+
                 if (this._registered)
                 {
                     var remove = new[]
@@ -329,10 +377,6 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
 
             foreach (var device in registered)
             {
-                PluginLog.Info(
-                    $"{Tag} host registration: page=0x{device.UsagePage:X2} usage=0x{device.Usage:X2} "
-                    + $"flags=0x{device.Flags:X} target=0x{device.Target.ToInt64():X}");
-
                 if (device.UsagePage == UsagePageGenericDesktop && device.Usage == UsageMouse)
                 {
                     return true;
@@ -387,105 +431,58 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
             }
 
             var device = input.Header.Device;
-            var mouse = input.Mouse;
 
-            this.Describe(device);
-
-            if (mouse.ButtonFlags == 0)
+            if (LogEvents && input.Mouse.ButtonFlags != 0)
             {
-                // Pure movement arrives hundreds of times a second. Which DEVICE is
-                // moving is the whole question, so it is counted per device and
-                // summarised once a second rather than logged event by event.
-                this._movesByDevice[device] = this._movesByDevice.GetValueOrDefault(device) + 1;
-            }
-            else
-            {
-                // ButtonData is the wheel delta when a wheel flag is set: signed,
-                // 120 per detent, or a fraction of that from a high-resolution wheel.
                 PluginLog.Info(
-                    $"{Tag} dev={Short(device)} flags=0x{mouse.ButtonFlags:X4} ({Decode(mouse.ButtonFlags)}) "
-                    + $"data={unchecked((Int16)mouse.ButtonData)} extra=0x{mouse.ExtraInformation:X}");
+                    $"{Tag} event dev=0x{device.ToInt64():X} flags=0x{input.Mouse.ButtonFlags:X4} "
+                    + $"data={unchecked((Int16)input.Mouse.ButtonData)}");
             }
 
-            this.FlushMoves();
-        }
-
-        private void FlushMoves()
-        {
-            var now = Environment.TickCount64;
-
-            if ((now - this._movesFlushedMs) < 1000 || this._movesByDevice.Count == 0)
+            // No device means the input was injected rather than produced by
+            // hardware. It says nothing about which device the user is holding.
+            if (device == IntPtr.Zero)
             {
                 return;
             }
 
-            this._movesFlushedMs = now;
-
-            foreach (var entry in this._movesByDevice)
-            {
-                PluginLog.Info($"{Tag} moves in the last second: dev={Short(entry.Key)} x{entry.Value}");
-            }
-
-            this._movesByDevice.Clear();
-        }
-
-        /// <summary>Logs a device's name the first time it is seen.</summary>
-        private void Describe(IntPtr device)
-        {
-            if (this._deviceNames.ContainsKey(device))
+            // This runs for every mouse movement, hundreds of times a second, so the
+            // common case - same device as last time - must cost one comparison.
+            if (device == this._lastDevice)
             {
                 return;
             }
 
-            var name = "(NULL device - injected or synthesised, not hardware)";
+            this._lastDevice = device;
 
-            if (device != IntPtr.Zero)
+            if (!this._isLogitechByDevice.TryGetValue(device, out var isLogitech))
             {
-                UInt32 length = 0;
-                GetRawInputDeviceInfoW(device, RIDI_DEVICENAME, null, ref length);
+                var name = DeviceName(device);
 
-                var buffer = new StringBuilder((Int32)length + 1);
+                // A device whose name cannot be read is allowed, not ignored. It
+                // might be the MX Master, and silencing that is the worse mistake.
+                isLogitech = name.Length == 0 || LogitechVendor.IsMatch(name);
+                this._isLogitechByDevice[device] = isLogitech;
 
-                name = GetRawInputDeviceInfoW(device, RIDI_DEVICENAME, buffer, ref length) == UInt32.MaxValue
-                    ? "(name unavailable)"
-                    : buffer.ToString();
+                PluginLog.Info(
+                    $"{Tag} 0x{device.ToInt64():X} {(isLogitech ? "DRIVES haptics" : "is ignored")}: "
+                    + (name.Length == 0 ? "(name unavailable)" : name));
             }
 
-            this._deviceNames[device] = name;
-
-            // The name carries the vendor and product ids - VID_046D is Logitech -
-            // which is what a real filter would match on.
-            PluginLog.Info($"{Tag} NEW DEVICE {Short(device)} = {name}");
+            this._lastHardwareIsLogitech = isLogitech;
+            this._seenHardware = true;
         }
 
-        private static String Short(IntPtr device) => "0x" + device.ToInt64().ToString("X");
-
-        private static String Decode(UInt16 flags)
+        private static String DeviceName(IntPtr device)
         {
-            var names = new List<String>();
+            UInt32 length = 0;
+            GetRawInputDeviceInfoW(device, RIDI_DEVICENAME, null, ref length);
 
-            void Add(UInt16 bit, String label)
-            {
-                if ((flags & bit) != 0)
-                {
-                    names.Add(label);
-                }
-            }
+            var buffer = new StringBuilder((Int32)length + 1);
 
-            Add(0x0001, "left-down");
-            Add(0x0002, "left-up");
-            Add(0x0004, "right-down");
-            Add(0x0008, "right-up");
-            Add(0x0010, "middle-down");
-            Add(0x0020, "middle-up");
-            Add(0x0040, "button4-down");
-            Add(0x0080, "button4-up");
-            Add(0x0100, "button5-down");
-            Add(0x0200, "button5-up");
-            Add(0x0400, "WHEEL");
-            Add(0x0800, "HWHEEL");
-
-            return String.Join("+", names);
+            return GetRawInputDeviceInfoW(device, RIDI_DEVICENAME, buffer, ref length) == UInt32.MaxValue
+                ? String.Empty
+                : buffer.ToString();
         }
 
         public void Stop()
@@ -497,9 +494,11 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
 
             try
             {
+                this._listening = false;
+
                 if (this._window != IntPtr.Zero)
                 {
-                    // Posted, not sent: the window belongs to the probe thread, and
+                    // Posted, not sent: the window belongs to the tracker thread, and
                     // closing it there is what ends its message loop.
                     PostMessageW(this._window, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
                 }

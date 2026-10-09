@@ -188,10 +188,22 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
 
         public String Name => "Mouse";
 
-        public MouseInputSource(HapticOutput haptics, HapticSettings settings)
+        /// <summary>
+        /// Says whether the device in use right now should drive haptics.
+        /// </summary>
+        /// <remarks>
+        /// The hook cannot answer this itself: it sees input merged across every
+        /// pointing device, with nothing to say which one moved. Null means no
+        /// filtering, which is how this behaved before the question could be asked.
+        /// </remarks>
+        private readonly Func<Boolean> _deviceAllowsHaptics;
+
+        public MouseInputSource(
+            HapticOutput haptics, HapticSettings settings, Func<Boolean> deviceAllowsHaptics = null)
         {
             this._haptics = haptics ?? throw new ArgumentNullException(nameof(haptics));
             this._settings = settings ?? throw new ArgumentNullException(nameof(settings));
+            this._deviceAllowsHaptics = deviceAllowsHaptics;
         }
 
         /// <summary>
@@ -646,6 +658,13 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
             if (eventId == null || !this._settings.IsEnabled(eventId))
             {
                 return; // Unsupported input, or turned off by the user.
+            }
+
+            // Another mouse, or a trackpad. Checked here rather than at each caller
+            // so no path to the motor can forget it.
+            if (this._deviceAllowsHaptics != null && !this._deviceAllowsHaptics())
+            {
+                return;
             }
 
             if (cooldownMs > 0)

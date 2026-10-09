@@ -405,17 +405,21 @@ namespace Loupedeck.ThrumHapticsPlugin
             // runtime, so library validation refuses any dylib not signed by Apple
             // or by Logitech. macOS therefore taps CoreGraphics directly and ships
             // no native binary of ours. MacMouseInputSource documents this in full.
-            this._inputSources.Add(OperatingSystem.IsMacOS()
-                ? new MacMouseInputSource(this._haptics, this.Settings)
-                : new MouseInputSource(this._haptics, this.Settings));
-
-            // SPIKE, Windows only, logs and nothing else: can Raw Input tell the
-            // MX Master apart from other pointers while Options+ is running? It
-            // decides whether per-device filtering is buildable, and it must be
-            // gone - or replaced by the real thing - before 1.3.0 ships.
-            if (OperatingSystem.IsWindows())
+            if (OperatingSystem.IsMacOS())
             {
-                this._inputSources.Add(new RawInputProbe());
+                this._inputSources.Add(new MacMouseInputSource(this._haptics, this.Settings));
+            }
+            else
+            {
+                // Windows only. The hook cannot tell which pointing device moved, so
+                // a second mouse or a trackpad would buzz the MX Master too. The
+                // tracker can, and the hook's input source asks it before playing
+                // anything. Added first so it is listening before the hook is.
+                var devices = new RawInputDeviceTracker();
+
+                this._inputSources.Add(devices);
+                this._inputSources.Add(
+                    new MouseInputSource(this._haptics, this.Settings, () => devices.AllowsHaptics));
             }
 
             foreach (var source in this._inputSources)
