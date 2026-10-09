@@ -42,7 +42,13 @@
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Version,
-    [string]$Configuration = 'Release'
+    [string]$Configuration = 'Release',
+
+    # A build for testing on your own machines, never for release. Stamps
+    # -Version into the STAGED manifest instead of requiring the source manifest
+    # to match it, and marks the file name, so trying something out does not mean
+    # editing LoupedeckPackage.yaml and remembering to put it back.
+    [switch]$TestBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -105,6 +111,11 @@ $text = [IO.File]::ReadAllText($manifest, [Text.Encoding]::UTF8)
 # packed straight from bin-mac. In the dual package it has to point at the nested
 # copy instead.
 $text = $text.Replace('pluginFolderMac: bin', 'pluginFolderMac: bin/mac')
+
+if ($TestBuild) {
+    $text = [regex]::Replace($text, '(?m)^version:\s*\S+', "version: $Version")
+}
+
 [IO.File]::WriteAllText($manifest, $text, (New-Object System.Text.UTF8Encoding($false)))
 
 $declared = (($text -split "`n") | Where-Object { $_ -match '^version:' }) -replace 'version:\s*', ''
@@ -129,7 +140,8 @@ foreach ($probe in @('bin\ThrumHapticsPlugin.dll', 'bin\ThrumHapticsSettings.exe
 $stale = Get-ChildItem $staging -Recurse -File | Where-Object { $_.Name -match '(?i)mxhaptic' }
 if ($stale) { throw "Files from the old plugin name survived: $($stale.Name -join ', ')" }
 
-$out = Join-Path $dist ("ThrumHaptics_" + ($Version -replace '\.', '_') + ".lplug4")
+$suffix = if ($TestBuild) { '_TEST' } else { '' }
+$out = Join-Path $dist ("ThrumHaptics_" + ($Version -replace '\.', '_') + "$suffix.lplug4")
 if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Force }
 
 logiplugintool pack $staging $out | Out-Host

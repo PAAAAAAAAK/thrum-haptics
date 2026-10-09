@@ -409,6 +409,15 @@ namespace Loupedeck.ThrumHapticsPlugin
                 ? new MacMouseInputSource(this._haptics, this.Settings)
                 : new MouseInputSource(this._haptics, this.Settings));
 
+            // SPIKE, Windows only, logs and nothing else: can Raw Input tell the
+            // MX Master apart from other pointers while Options+ is running? It
+            // decides whether per-device filtering is buildable, and it must be
+            // gone - or replaced by the real thing - before 1.3.0 ships.
+            if (OperatingSystem.IsWindows())
+            {
+                this._inputSources.Add(new RawInputProbe());
+            }
+
             foreach (var source in this._inputSources)
             {
                 try
