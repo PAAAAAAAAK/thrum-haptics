@@ -26,21 +26,21 @@ Two things below are also superseded by the shipped implementation:
 
 ## Where the port stands
 
-Branch `macos-support`. Verified on macOS 26.6.1, Apple Silicon, with an
-MX Master 4 over Bluetooth.
+Shipped in 1.2.0. Verified on macOS 26.6.1, Apple Silicon, with an MX Master 4
+over Bluetooth.
 
 **Working:** left / right / middle click, drag start and end, vertical scroll,
-thumb-wheel scroll, and the settings window. Haptics fire in every application.
-The event tap survives sustained use with no OS timeouts.
+thumb-wheel scroll, screen edge, and the settings window. Haptics fire in every
+application. The event taps survive sustained use with no OS timeouts.
 
-**Not possible:** the **back and forward thumb buttons**. Established on device
-and closed — see fact 6. They are being removed from the macOS catalogue rather
-than left as settings that can never fire.
+**Thumb buttons:** the presses themselves are unreachable (fact 6), but the
+gesture Options+ posts in their place is not. They ship as one combined
+`mouse.thumb` event, off by default — see *The mission*, item 1.
 
-**Not implemented:** screen-edge haptics on macOS. `MouseInputSource` reads
-virtual-desktop bounds via `GetSystemMetrics`, which has no macOS equivalent
-here yet; `CGDisplayBounds` over `CGGetActiveDisplayList` is the replacement.
-Off by default, so it was cut from the first pass rather than rushed.
+**Screen edge:** implemented per display in `MacMouseInputSource.AtWall`, using
+`CGDisplayBounds` over `CGGetActiveDisplayList`. A bounding box of all displays
+was tried first and is the wrong model; Windows later took the same per-display
+logic for the same reason.
 
 ---
 
@@ -107,8 +107,13 @@ approach of counting rotation toward a fixed threshold (1080) is meaningless
 here.
 
 Momentum-phase events are skipped — that is inertial scrolling the OS continues
-after the wheel stops, and it was the bulk of the over-firing. Current pacing is
-the 50 ms cooldown, reported as good in use.
+after the wheel stops, and it was the bulk of the over-firing.
+
+Pacing is no longer a constant. The vertical wheel is rate-limited by the user's
+Density setting (35 ms at Standard), and the thumb wheel accumulates points of
+travel towards a per-density step, since it has no physical detents at all. See
+`ScrollCooldownByDensity` and `ThumbWheelPointsByDensity` in
+`MacMouseInputSource`.
 
 ### 6. The thumb buttons are unreachable, and this is now measured
 

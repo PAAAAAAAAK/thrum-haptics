@@ -12,7 +12,7 @@ actually do with a mouse, everywhere you do them.
 - **Windows and macOS.** One package, both platforms — the same waveforms, the
   same settings, whichever machine you are on.
 - **One install.** Download, double-click, done. The settings window ships inside
-  the plugin — nothing else to fetch, nothing to sign into.
+  the plugin — no companion app, nothing to sign into.
 - **Yours to tune.** Every input can be switched off or given a different
   waveform, with a live preview so you choose by feel rather than by name, and
   the wheels let you set how closely their ticks are spaced.
@@ -137,11 +137,45 @@ To uninstall, right-click the same `.lplug4` and choose **Uninstall Plugin**.
 - Logitech **MX Master 4** — the only Logitech mouse with a controllable haptic motor
 - **Logi Options+** (installs the Logi Plugin Service)
 - **Windows x64**, or **macOS on Apple Silicon**
+- **.NET 10 or newer**, for the settings window only — haptics work without it.
+  If the settings window doesn't open, see
+  [Settings window won't open](#settings-window-wont-open).
 
 On macOS the haptics need Accessibility permission — but it attaches to
 LogiPluginService, which Options+ already holds, so there is normally nothing for
 you to grant. If nothing buzzes, check System Settings → Privacy & Security →
 **Accessibility** and confirm LogiPluginService is enabled there.
+
+## Troubleshooting
+
+### Settings window won't open
+
+If haptics work but pressing **Haptic Settings** does nothing, the settings
+window is missing the .NET runtime it runs on. The haptics themselves run inside
+Logi's own service, which is why they carry on regardless.
+
+Install it from <https://dotnet.microsoft.com/download/dotnet/10.0>:
+
+- **macOS** — in the **.NET Runtime** column, choose **macOS → Arm64 →
+  Installer**, and run the `.pkg`. Not the SDK, and not the ASP.NET Core Runtime.
+- **Windows** — Windows normally offers this itself the first time, with a
+  download button. Otherwise choose **.NET Desktop Runtime → Windows → x64**.
+
+Then press Haptic Settings again; nothing needs restarting. Any version from 10
+upwards works.
+
+To confirm that this is the cause on macOS, the plugin's log says so in plain
+words:
+
+```
+grep -i "settings" ~/Library/Application\ Support/Logi/LogiPluginService/Logs/plugin_logs/ThrumHaptics.log | tail -10
+```
+
+On Windows the same log is at
+`%LOCALAPPDATA%\Logi\LogiPluginService\Logs\plugin_logs\ThrumHaptics.log`. If it
+shows something else, please
+[open an issue](https://github.com/PAAAAAAAAK/thrum-haptics/issues) with those
+lines.
 
 ## Settings
 
