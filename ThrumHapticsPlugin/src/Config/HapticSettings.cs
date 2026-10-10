@@ -88,6 +88,19 @@ namespace Loupedeck.ThrumHapticsPlugin.Config
                 ? value
                 : HapticEvents.DefaultDensity;
 
+        /// <summary>Reads a plugin-wide flag that is not a per-event preference.</summary>
+        /// <remarks>
+        /// Not cached, unlike everything above: these are read once at start, never
+        /// on the input path, and never shown in the settings window.
+        /// </remarks>
+        public Boolean GetFlag(String key) =>
+            this._plugin.TryGetPluginSetting(key, out var raw)
+            && Boolean.TryParse(raw, out var value)
+            && value;
+
+        public void SetFlag(String key, Boolean value) =>
+            this._plugin.SetPluginSetting(key, value.ToString());
+
         public void SetDensity(String eventId, Int32 level)
         {
             var def = HapticEvents.Find(eventId);

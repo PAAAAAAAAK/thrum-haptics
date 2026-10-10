@@ -82,10 +82,9 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
         private IntPtr _diagnosticTap;
         private IntPtr _diagnosticRunLoopSource;
 
-        // SPIKE. Logs which device each event came from and changes nothing; see
-        // MacDeviceProbe, and remove this with it.
-        private readonly MacDeviceProbe _deviceProbe = new();
-        private String _primaryTapName = MacDeviceProbe.HidTap;
+        // Which device an event came from. Both taps ask it, and both run on the
+        // one tap thread, so it is shared without a lock.
+        private readonly MacDeviceFilter _devices;
 
         public String Name => "Mouse (macOS)";
 
@@ -93,6 +92,7 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
         {
             this._haptics = haptics ?? throw new ArgumentNullException(nameof(haptics));
             this._settings = settings ?? throw new ArgumentNullException(nameof(settings));
+            this._devices = new MacDeviceFilter(this._settings);
         }
 
         // --- CoreGraphics / CoreFoundation ------------------------------------
@@ -557,10 +557,8 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
 
                 PluginLog.Info("[ThrumHaptics] macOS event tap ENABLED - now receiving system-wide mouse events.");
 
-                this._primaryTapName =
-                    location == HidEventTap ? MacDeviceProbe.HidTap : MacDeviceProbe.SessionTapAsPrimary;
-
-                this._deviceProbe.Start();
+                // Before the run loop starts, so it is settled before the first event.
+                this._devices.Start();
 
                 // Shares this thread's run loop deliberately: one thread, one loop,
                 // two sources. A second thread would buy nothing and would need its
@@ -670,7 +668,13 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                     return @event;
                 }
 
-                this._deviceProbe.Observe(MacDeviceProbe.SessionTap, type, @event);
+                // Before the scroll bookkeeping below, not after it: another
+                // device's scrolling must not be what makes a thumb press look
+                // like a thumb-wheel roll.
+                if (!this._devices.Allows(type, @event))
+                {
+                    return @event;
+                }
 
                 var now = Environment.TickCount64;
 
@@ -755,7 +759,14 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                     return @event;
                 }
 
-                this._deviceProbe.Observe(this._primaryTapName, type, @event);
+                // Another device's input stops HERE, before any of it is counted.
+                // Dropping it only at the moment of playing would still let a
+                // trackpad fill the scroll accumulators and start drags that the
+                // MX Master's next event then finishes.
+                if (!this._devices.Allows(type, @event))
+                {
+                    return @event;
+                }
 
                 switch (type)
                 {
@@ -1193,8 +1204,6 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
 
                 // Bounded: a plugin reload must never block on this.
                 this._thread.Join(TimeSpan.FromSeconds(2));
-
-                this._deviceProbe.Stop();
 
                 // INVALIDATE before releasing, and only once the run loop thread
                 // has exited. Releasing alone leaves the port registered and the
