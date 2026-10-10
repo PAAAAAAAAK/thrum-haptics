@@ -257,7 +257,12 @@ Two things the trackpad taught, both now in the code:
   other device has been
   untouched for a quarter second, the same rule and number as on Windows.
 
-Not yet tried: a Bolt receiver, and a machine with two Logitech pointers.
+Through a **Bolt receiver** the sender resolves to "USB Receiver", still vendor
+`0x046D` — which is why the vendor is matched and not the product. Clicks through
+it were verified on device; switching back to Bluetooth gives the mouse a new
+sender id, which is identified afresh.
+
+Not yet tried: a machine with two Logitech pointers.
 
 ### 3. Unaccelerated scroll detents — untested, possibly free
 
