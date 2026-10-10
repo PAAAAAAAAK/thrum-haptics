@@ -133,10 +133,20 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
 
         private const Int64 LogitechVendorId = 0x046D;
 
+        private const UInt32 FieldScrollMomentumPhase = 123;
+
         private const UInt32 EventMouseMoved = 5;
         private const UInt32 EventLeftMouseDragged = 6;
         private const UInt32 EventRightMouseDragged = 7;
+        private const UInt32 EventRotate = 18;
+        private const UInt32 EventBeginGesture = 19;
+        private const UInt32 EventEndGesture = 20;
+        private const UInt32 EventScrollWheel = 22;
         private const UInt32 EventOtherMouseDragged = 27;
+        private const UInt32 EventGesture = 29;
+        private const UInt32 EventMagnify = 30;
+        private const UInt32 EventSwipe = 31;
+        private const UInt32 EventSmartMagnify = 32;
 
         private enum Verdict
         {
@@ -320,7 +330,7 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
 
                     case Verdict.Other:
                         this._fromOther++;
-                        this.OtherDeviceUsed(type, now);
+                        this.OtherDeviceUsed(type, @event, now);
                         return !this._engaged;
 
                     default:
@@ -347,7 +357,7 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                 // of it waits for the other device to go quiet.
                 if (this._engaged && (now - this._lastOtherUseMs) <= OtherDeviceQuietMs)
                 {
-                    this._postedHeld++;
+                    this.NotePostedHeld(type, now);
                     return false;
                 }
 
@@ -403,8 +413,39 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
             this.HardwareIs(logitech: true);
         }
 
-        private void OtherDeviceUsed(UInt32 type, Int64 now)
+        /// <summary>Notes that another device is in use - if this event shows that it is.</summary>
+        /// <remarks>
+        /// "In use" has to mean TOUCHED, because the quiet period above rests on
+        /// it, and not everything a device sends means that.
+        ///
+        /// MEASURED: after a two-finger swipe the trackpad goes on sending scroll
+        /// events for a second or more with nobody touching it - the scrolling
+        /// coasting to a stop. Counted as use, that held back the first
+        /// thumb-button press after every swipe: a hand reaches the mouse sooner
+        /// than the coasting ends. Those events are marked as momentum, so they
+        /// are left out.
+        ///
+        /// Gestures are left out as well, on reasoning rather than measurement:
+        /// the trackpad reports them for every frame something rests on it, and a
+        /// palm lying on the trackpad is not somebody using it. A real swipe or
+        /// click still arrives as scrolling or a button, and those count.
+        /// </remarks>
+        private void OtherDeviceUsed(UInt32 type, IntPtr @event, Int64 now)
         {
+            if (type is EventRotate or EventBeginGesture or EventEndGesture or EventGesture
+                or EventMagnify or EventSwipe or EventSmartMagnify)
+            {
+                this._otherGestures++;
+                return;
+            }
+
+            if (type == EventScrollWheel
+                && CGEventGetIntegerValueField(@event, FieldScrollMomentumPhase) != 0)
+            {
+                this._otherMomentum++;
+                return;
+            }
+
             if (type is EventMouseMoved or EventLeftMouseDragged
                 or EventRightMouseDragged or EventOtherMouseDragged)
             {
@@ -421,6 +462,7 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
             }
 
             this._lastOtherUseMs = now;
+            this._lastOtherUseType = type;
             this.HardwareIs(logitech: false);
         }
 
@@ -650,6 +692,28 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
         private Int64 _noSource;
         private Int64 _heldBack;
 
+        private const Int32 MaxHeldLines = 40;
+
+        private UInt32 _lastOtherUseType;
+        private Int64 _otherGestures;
+        private Int64 _otherMomentum;
+        private Int32 _heldLines;
+
+        /// <summary>Says WHY posted input was held, for the first few times it happens.</summary>
+        private void NotePostedHeld(UInt32 type, Int64 now)
+        {
+            this._postedHeld++;
+
+            if (this._heldLines < MaxHeldLines)
+            {
+                this._heldLines++;
+
+                PluginLog.Info(
+                    $"{Tag} held posted event type {type}: another device sent event type "
+                    + $"{this._lastOtherUseType} {now - this._lastOtherUseMs}ms earlier.");
+            }
+        }
+
         private void NoteNoSource(UInt32 type)
         {
             this._noSource++;
@@ -675,13 +739,16 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
             this._lastTallyMs = now;
 
             PluginLog.Info(
-                $"{Tag} 10s: logitech {this._fromLogitech}, other device {this._fromOther}, "
+                $"{Tag} 10s: logitech {this._fromLogitech}, other device {this._fromOther} "
+                + $"(coasting {this._otherMomentum}, gestures {this._otherGestures}), "
                 + $"unresolved {this._unresolved}, posted by logitech {this._postedByLogitech} "
                 + $"(of which held {this._postedHeld}), posted by other {this._postedByOther}, "
                 + $"no source {this._noSource} -> held back {this._heldBack}");
 
             this._fromLogitech = 0;
             this._fromOther = 0;
+            this._otherMomentum = 0;
+            this._otherGestures = 0;
             this._unresolved = 0;
             this._postedByLogitech = 0;
             this._postedHeld = 0;
