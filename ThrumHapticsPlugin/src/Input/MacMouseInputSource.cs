@@ -82,6 +82,11 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
         private IntPtr _diagnosticTap;
         private IntPtr _diagnosticRunLoopSource;
 
+        // SPIKE. Logs which device each event came from and changes nothing; see
+        // MacDeviceProbe, and remove this with it.
+        private readonly MacDeviceProbe _deviceProbe = new();
+        private String _primaryTapName = MacDeviceProbe.HidTap;
+
         public String Name => "Mouse (macOS)";
 
         public MacMouseInputSource(HapticOutput haptics, HapticSettings settings)
@@ -552,6 +557,11 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
 
                 PluginLog.Info("[ThrumHaptics] macOS event tap ENABLED - now receiving system-wide mouse events.");
 
+                this._primaryTapName =
+                    location == HidEventTap ? MacDeviceProbe.HidTap : MacDeviceProbe.SessionTapAsPrimary;
+
+                this._deviceProbe.Start();
+
                 // Shares this thread's run loop deliberately: one thread, one loop,
                 // two sources. A second thread would buy nothing and would need its
                 // own shutdown path.
@@ -660,6 +670,8 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                     return @event;
                 }
 
+                this._deviceProbe.Observe(MacDeviceProbe.SessionTap, type, @event);
+
                 var now = Environment.TickCount64;
 
                 if (type == EventScrollWheel)
@@ -742,6 +754,8 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                     CGEventTapEnable(this._tap, true);
                     return @event;
                 }
+
+                this._deviceProbe.Observe(this._primaryTapName, type, @event);
 
                 switch (type)
                 {
@@ -1179,6 +1193,8 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
 
                 // Bounded: a plugin reload must never block on this.
                 this._thread.Join(TimeSpan.FromSeconds(2));
+
+                this._deviceProbe.Stop();
 
                 // INVALIDATE before releasing, and only once the run loop thread
                 // has exited. Releasing alone leaves the port registered and the
