@@ -294,12 +294,7 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
 
             try
             {
-                var now = Environment.TickCount64;
-                var allowed = this.Judge(type, @event, now);
-
-                this.Tally(allowed, now);
-
-                return allowed;
+                return this.Judge(type, @event, Environment.TickCount64);
             }
             catch (Exception ex)
             {
@@ -324,12 +319,10 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                 switch (this.SenderVerdict(sender, now))
                 {
                     case Verdict.Logitech:
-                        this._fromLogitech++;
                         this.LogitechPointerUsed();
                         return true;
 
                     case Verdict.Other:
-                        this._fromOther++;
                         this.OtherDeviceUsed(type, @event, now);
                         return !this._engaged;
 
@@ -337,7 +330,6 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                         // A device that could not be looked up. Not evidence of
                         // anything, so it neither plays the part of the Logitech
                         // pointer nor takes the answer away from it.
-                        this._unresolved++;
                         return true;
                 }
             }
@@ -349,28 +341,12 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                 // Options+, acting for the very mouse we want - or a process whose
                 // path could not be read, which gets the benefit of the doubt
                 // rather than costing the MX Master its wheels.
-                this._postedByLogitech++;
-
+                //
                 // Everything Options+ has been seen to post is a wheel or the
                 // gesture it sends for a thumb button, and the thumb WHEEL sends
                 // that same gesture, so none of it can be told from a wheel. All
                 // of it waits for the other device to go quiet.
-                if (this._engaged && (now - this._lastOtherUseMs) <= OtherDeviceQuietMs)
-                {
-                    this.NotePostedHeld(type, now);
-                    return false;
-                }
-
-                return true;
-            }
-
-            if (poster != 0)
-            {
-                this._postedByOther++;
-            }
-            else
-            {
-                this.NoteNoSource(type);
+                return !this._engaged || (now - this._lastOtherUseMs) > OtherDeviceQuietMs;
             }
 
             // Posted by some other program, or carrying no source at all. It has
@@ -435,14 +411,12 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
             if (type is EventRotate or EventBeginGesture or EventEndGesture or EventGesture
                 or EventMagnify or EventSwipe or EventSmartMagnify)
             {
-                this._otherGestures++;
                 return;
             }
 
             if (type == EventScrollWheel
                 && CGEventGetIntegerValueField(@event, FieldScrollMomentumPhase) != 0)
             {
-                this._otherMomentum++;
                 return;
             }
 
@@ -462,7 +436,6 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
             }
 
             this._lastOtherUseMs = now;
-            this._lastOtherUseType = type;
             this.HardwareIs(logitech: false);
         }
 
@@ -669,92 +642,6 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
             {
                 CFRelease(value);
             }
-        }
-
-        // --- TEMPORARY: counts for the first runs on device --------------------
-        //
-        // The runs so far saw a mouse and a trackball but no trackpad. These lines
-        // say how events are being sorted - and, above all, whether anything
-        // arrives with no source at all, which the rules above can only guess
-        // about. They come out once a trackpad has been seen on device.
-
-        private const Int64 TallyEveryMs = 10_000;
-
-        private readonly HashSet<UInt32> _noSourceTypes = new();
-
-        private Int64 _lastTallyMs = Environment.TickCount64;
-        private Int64 _fromLogitech;
-        private Int64 _fromOther;
-        private Int64 _unresolved;
-        private Int64 _postedByLogitech;
-        private Int64 _postedHeld;
-        private Int64 _postedByOther;
-        private Int64 _noSource;
-        private Int64 _heldBack;
-
-        private const Int32 MaxHeldLines = 40;
-
-        private UInt32 _lastOtherUseType;
-        private Int64 _otherGestures;
-        private Int64 _otherMomentum;
-        private Int32 _heldLines;
-
-        /// <summary>Says WHY posted input was held, for the first few times it happens.</summary>
-        private void NotePostedHeld(UInt32 type, Int64 now)
-        {
-            this._postedHeld++;
-
-            if (this._heldLines < MaxHeldLines)
-            {
-                this._heldLines++;
-
-                PluginLog.Info(
-                    $"{Tag} held posted event type {type}: another device sent event type "
-                    + $"{this._lastOtherUseType} {now - this._lastOtherUseMs}ms earlier.");
-            }
-        }
-
-        private void NoteNoSource(UInt32 type)
-        {
-            this._noSource++;
-
-            if (this._noSourceTypes.Add(type))
-            {
-                PluginLog.Info($"{Tag} event type {type} arrived with no sender and no posting process.");
-            }
-        }
-
-        private void Tally(Boolean allowed, Int64 now)
-        {
-            if (!allowed)
-            {
-                this._heldBack++;
-            }
-
-            if ((now - this._lastTallyMs) < TallyEveryMs)
-            {
-                return;
-            }
-
-            this._lastTallyMs = now;
-
-            PluginLog.Info(
-                $"{Tag} 10s: logitech {this._fromLogitech}, other device {this._fromOther} "
-                + $"(coasting {this._otherMomentum}, gestures {this._otherGestures}), "
-                + $"unresolved {this._unresolved}, posted by logitech {this._postedByLogitech} "
-                + $"(of which held {this._postedHeld}), posted by other {this._postedByOther}, "
-                + $"no source {this._noSource} -> held back {this._heldBack}");
-
-            this._fromLogitech = 0;
-            this._fromOther = 0;
-            this._otherMomentum = 0;
-            this._otherGestures = 0;
-            this._unresolved = 0;
-            this._postedByLogitech = 0;
-            this._postedHeld = 0;
-            this._postedByOther = 0;
-            this._noSource = 0;
-            this._heldBack = 0;
         }
     }
 }
