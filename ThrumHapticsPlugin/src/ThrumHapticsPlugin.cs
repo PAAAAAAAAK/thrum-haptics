@@ -32,19 +32,29 @@ namespace Loupedeck.ThrumHapticsPlugin
 
         private SettingsServer _settingsServer;
 
+        /// <summary>The settings application this plugin launched, while it runs.</summary>
+        private System.Diagnostics.Process _settingsProcess;
+
+        private readonly Object _settingsProcessGate = new();
+
         /// <summary>
         /// Launches the bundled settings application.
         /// </summary>
         /// <remarks>
-        /// The executable sits beside this assembly inside the plugin package, so
-        /// there is still exactly one thing to install. If it is already running,
-        /// starting it again is harmless: it detects the existing instance and
-        /// surfaces that window instead of opening a second one.
+        /// The executable sits beside this assembly inside the plugin package. If
+        /// it is already running, a second press brings that window forward rather
+        /// than opening another: on Windows the application does that itself, and
+        /// on macOS, where it cannot, the plugin does it for it.
         /// </remarks>
         internal void ShowSettingsWindow()
         {
             try
             {
+                if (this.TryRaiseRunningSettingsWindow())
+                {
+                    return;
+                }
+
                 // Use the SDK's AssemblyFilePath, NOT Assembly.Location. The Plugin
                 // Service loads plugins into a collectible load context, which
                 // leaves Location empty - GetDirectoryName then returns null and
@@ -84,10 +94,16 @@ namespace Loupedeck.ThrumHapticsPlugin
                     WorkingDirectory = pluginDir,
                 };
 
-                // PROBE INSTRUMENTATION, macOS only - remove once the launch path is
-                // proven. Two different failures are possible here and they need
-                // telling apart: a lost execute bit throws on Start, while Gatekeeper
-                // refusing an ad-hoc signed binary lets it start and then kills it.
+                // The settings application's output is captured PERMANENTLY on macOS.
+                // This was once marked as probe code to delete "once the launch path
+                // is proven" - and the path then failed for the first user without
+                // .NET installed, where the only evidence anywhere was a line the
+                // .NET host wrote to stderr. On macOS that host shows no dialog, so
+                // this capture is the difference between a diagnosable report and
+                // "it does nothing".
+                //
+                // Windows is left alone: its host reports a missing runtime in a
+                // dialog of its own, and redirecting must not get in the way of that.
                 // Read asynchronously so a UI process that never exits cannot block us.
                 if (OperatingSystem.IsMacOS())
                 {
@@ -97,14 +113,24 @@ namespace Loupedeck.ThrumHapticsPlugin
 
                 // Started BEFORE Process.Start so the settings app's own "entered
                 // Main at 0ms" can be placed on this clock. The gap between them is
-                // the pre-main cost - .NET host startup, which is precisely the part
-                // ReadyToRun would address and the part the app cannot measure from
-                // inside itself.
+                // the pre-main cost - .NET host startup, which the app cannot
+                // measure from inside itself.
                 var launchClock = System.Diagnostics.Stopwatch.StartNew();
 
                 var process = System.Diagnostics.Process.Start(startInfo);
 
-                if (OperatingSystem.IsMacOS() && process != null)
+                if (process == null)
+                {
+                    PluginLog.Error("[ThrumHaptics] Settings application did not start (no process returned).");
+                    return;
+                }
+
+                // Read now: the exit handler disposes the process, and a settings
+                // application that dies instantly can get there before the log line.
+                var processId = process.Id;
+                var hostReportedMissingRuntime = false;
+
+                if (OperatingSystem.IsMacOS())
                 {
                     process.OutputDataReceived += (_, e) =>
                     {
@@ -119,6 +145,11 @@ namespace Loupedeck.ThrumHapticsPlugin
                     {
                         if (!String.IsNullOrWhiteSpace(e.Data))
                         {
+                            if (IsMissingRuntimeMessage(e.Data))
+                            {
+                                hostReportedMissingRuntime = true;
+                            }
+
                             PluginLog.Error($"[ThrumHaptics] settings-app stderr: {e.Data}");
                         }
                     };
@@ -127,13 +158,148 @@ namespace Loupedeck.ThrumHapticsPlugin
                     process.BeginErrorReadLine();
                 }
 
-                PluginLog.Info($"[ThrumHaptics] Settings application launched (pid {process?.Id}).");
+                lock (this._settingsProcessGate)
+                {
+                    this._settingsProcess = process;
+                }
+
+                // Handler BEFORE the switch that enables it: a process that has
+                // already died by this line would otherwise raise Exited to nobody.
+                process.Exited += (_, _) =>
+                    this.OnSettingsProcessExited(process, launchClock, () => hostReportedMissingRuntime);
+
+                process.EnableRaisingEvents = true;
+
+                PluginLog.Info($"[ThrumHaptics] Settings application launched (pid {processId}).");
             }
             catch (Exception ex)
             {
                 PluginLog.Error($"[ThrumHaptics] Failed to launch settings application: {ex.Message}");
             }
         }
+
+        /// <summary>
+        /// Brings an already-open settings window forward. macOS only.
+        /// </summary>
+        /// <remarks>
+        /// Returns true when there was a running instance to raise, so the caller
+        /// does not launch another. On Windows this always returns false: the
+        /// settings application there finds and raises its own window, and that
+        /// already works.
+        /// </remarks>
+        private Boolean TryRaiseRunningSettingsWindow()
+        {
+            if (!OperatingSystem.IsMacOS())
+            {
+                return false;
+            }
+
+            System.Diagnostics.Process running;
+
+            lock (this._settingsProcessGate)
+            {
+                running = this._settingsProcess;
+            }
+
+            if (running == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                if (running.HasExited)
+                {
+                    return false;
+                }
+
+                var raised = MacAppActivator.TryActivate(running.Id);
+
+                PluginLog.Info(
+                    $"[ThrumHaptics] Settings application already running (pid {running.Id}); "
+                    + (raised ? "brought forward." : "macOS declined to bring it forward."));
+
+                return true;
+            }
+            catch (Exception)
+            {
+                // Exited and disposed between the check and the call. Launch afresh.
+                return false;
+            }
+        }
+
+        /// <summary>Records how the settings application ended, and why if it is known.</summary>
+        /// <remarks>
+        /// Before this existed a launch left exactly one line - "launched (pid N)" -
+        /// whether the window then opened, crashed, or was never allowed to run. An
+        /// exit code turns each of those into something a log can answer.
+        /// </remarks>
+        private void OnSettingsProcessExited(
+            System.Diagnostics.Process process,
+            System.Diagnostics.Stopwatch launchClock,
+            Func<Boolean> hostReportedMissingRuntime)
+        {
+            try
+            {
+                // The parameterless overload also waits for the redirected streams
+                // to drain. Exited can arrive before the last stderr line has been
+                // read, and that line is the one naming a missing runtime.
+                process.WaitForExit();
+
+                var exitCode = process.ExitCode;
+
+                PluginLog.Info(
+                    $"[ThrumHaptics] Settings application exited with code {exitCode} "
+                    + $"after {launchClock.ElapsedMilliseconds}ms.");
+
+                if (hostReportedMissingRuntime() || IsMissingRuntimeExitCode(exitCode))
+                {
+                    PluginLog.Error(
+                        "[ThrumHaptics] The settings window could not start because the .NET runtime is not "
+                        + "installed. Haptics are unaffected. Install "
+                        + (OperatingSystem.IsMacOS()
+                            ? "the .NET 10 Runtime (macOS Arm64 installer)"
+                            : "the .NET 10 Desktop Runtime (x64)")
+                        + " from https://dotnet.microsoft.com/download/dotnet/10.0 and press Haptic Settings again.");
+                }
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Error($"[ThrumHaptics] Could not read the settings application's exit: {ex.Message}");
+            }
+            finally
+            {
+                lock (this._settingsProcessGate)
+                {
+                    if (ReferenceEquals(this._settingsProcess, process))
+                    {
+                        this._settingsProcess = null;
+                    }
+                }
+
+                process.Dispose();
+            }
+        }
+
+        /// <summary>Whether a line from the .NET host says the runtime is missing.</summary>
+        /// <remarks>
+        /// Matched on text because that is all macOS offers: the host's exit code is
+        /// truncated to a byte there and 131 is also what a SIGQUIT looks like. The
+        /// three phrases cover no .NET at all, the wrong version, and a missing
+        /// host library.
+        /// </remarks>
+        private static Boolean IsMissingRuntimeMessage(String line) =>
+            line.Contains("You must install", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("No frameworks were found", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("hostfxr", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>The .NET host's own codes for a missing host library or framework.</summary>
+        /// <remarks>
+        /// Only ever matches on Windows, where the full 32-bit value survives. That
+        /// is the platform that needs it, since its output is not captured.
+        /// </remarks>
+        private static Boolean IsMissingRuntimeExitCode(Int32 exitCode) =>
+            exitCode == unchecked((Int32)0x80008083) || exitCode == unchecked((Int32)0x80008096);
 
         /// <summary>
         /// Restores the execute bit on the settings application, on Unix.
@@ -239,9 +405,22 @@ namespace Loupedeck.ThrumHapticsPlugin
             // runtime, so library validation refuses any dylib not signed by Apple
             // or by Logitech. macOS therefore taps CoreGraphics directly and ships
             // no native binary of ours. MacMouseInputSource documents this in full.
-            this._inputSources.Add(OperatingSystem.IsMacOS()
-                ? new MacMouseInputSource(this._haptics, this.Settings)
-                : new MouseInputSource(this._haptics, this.Settings));
+            if (OperatingSystem.IsMacOS())
+            {
+                this._inputSources.Add(new MacMouseInputSource(this._haptics, this.Settings));
+            }
+            else
+            {
+                // Windows only. The hook cannot tell which pointing device moved, so
+                // a second mouse or a trackpad would buzz the MX Master too. The
+                // tracker can, and the hook's input source asks it before playing
+                // anything. Added first so it is listening before the hook is.
+                var devices = new RawInputDeviceTracker();
+
+                this._inputSources.Add(devices);
+                this._inputSources.Add(
+                    new MouseInputSource(this._haptics, this.Settings, () => devices.AllowsHaptics));
+            }
 
             foreach (var source in this._inputSources)
             {

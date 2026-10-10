@@ -11,7 +11,20 @@
     <LangVersion>latest</LangVersion>
 
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+
+    <!-- Framework-dependent ON PURPOSE. The runtime is the user's to install - on
+         Windows the .NET host prompts for it by name - and bundling it would add
+         roughly 70MB to an 11MB package, because WinForms cannot be trimmed.
+
+         Logi Options+ does not provide one. LogiPluginService carries a private
+         runtime of its own, so nothing it installs is visible to this process. -->
     <SelfContained>false</SelfContained>
+
+    <!-- Any .NET from 10 upwards, not 10 alone. The default policy stops at the
+         major version, so a machine carrying only .NET 11 would refuse to start
+         this - the same closed door as having no runtime at all, reached by
+         someone who did install .NET. -->
+    <RollForward>Major</RollForward>
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
 
     <!-- Ships inside the plugin package next to the plugin assembly. -->

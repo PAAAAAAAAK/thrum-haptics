@@ -9,10 +9,12 @@ actually do with a mouse, everywhere you do them.
 - **Universal.** Responds to real mouse input, so it works in every application —
   your editor, your browser, your file manager, a game. Nothing to configure
   per-app.
+- **Only your mouse.** A second mouse, a trackball or a MacBook's trackpad beside
+  it stays silent — haptics answer the MX Master, not whatever moved the cursor.
 - **Windows and macOS.** One package, both platforms — the same waveforms, the
   same settings, whichever machine you are on.
 - **One install.** Download, double-click, done. The settings window ships inside
-  the plugin — nothing else to fetch, nothing to sign into.
+  the plugin — no companion app, nothing to sign into.
 - **Yours to tune.** Every input can be switched off or given a different
   waveform, with a live preview so you choose by feel rather than by name, and
   the wheels let you set how closely their ticks are spaced.
@@ -112,6 +114,29 @@ relies on timing rather than on anything the event carries, so starting a roll
 after a pause can occasionally produce one extra tick. That's a fair trade if you
 want the feedback, and not one to impose if you don't.
 
+### Only the mouse drives it
+
+Haptics answer the MX Master, not whatever happens to move the cursor. A second
+mouse, a trackball or a MacBook's trackpad beside it stays silent, and you can go
+back and forth between them freely.
+
+Each input is asked where it came from, and anything that isn't from a Logitech
+pointer is left alone. A few things worth knowing:
+
+- **Any Logitech pointer counts.** Devices are told apart by maker rather than by
+  model, which is why it works the same over Bluetooth and through a Bolt
+  receiver — and why, if you use two Logitech mice, both drive the motor.
+- **The wheels wait a moment for the other device.** Options+ delivers the
+  MX Master's wheels itself rather than as mouse hardware, so they arrive with no
+  device attached. They play once the other device has been untouched for a
+  quarter of a second — less time than it takes to move your hand across.
+- **When it can't tell, it plays.** If a device can't be identified, the plugin
+  behaves as it did before filtering existed rather than going quiet. On macOS
+  that includes the first moments after installing: other devices can still set
+  the motor off until you have moved the mouse once.
+- **Two devices at the very same instant** can still let the odd tick through on
+  Windows.
+
 ## Installing
 
 1. Download the latest `.lplug4` from
@@ -137,11 +162,45 @@ To uninstall, right-click the same `.lplug4` and choose **Uninstall Plugin**.
 - Logitech **MX Master 4** — the only Logitech mouse with a controllable haptic motor
 - **Logi Options+** (installs the Logi Plugin Service)
 - **Windows x64**, or **macOS on Apple Silicon**
+- **.NET 10 or newer**, for the settings window only — haptics work without it.
+  If the settings window doesn't open, see
+  [Settings window won't open](#settings-window-wont-open).
 
 On macOS the haptics need Accessibility permission — but it attaches to
 LogiPluginService, which Options+ already holds, so there is normally nothing for
 you to grant. If nothing buzzes, check System Settings → Privacy & Security →
 **Accessibility** and confirm LogiPluginService is enabled there.
+
+## Troubleshooting
+
+### Settings window won't open
+
+If haptics work but pressing **Haptic Settings** does nothing, the settings
+window is missing the .NET runtime it runs on. The haptics themselves run inside
+Logi's own service, which is why they carry on regardless.
+
+Install it from <https://dotnet.microsoft.com/download/dotnet/10.0>:
+
+- **macOS** — in the **.NET Runtime** column, choose **macOS → Arm64 →
+  Installer**, and run the `.pkg`. Not the SDK, and not the ASP.NET Core Runtime.
+- **Windows** — Windows normally offers this itself the first time, with a
+  download button. Otherwise choose **.NET Desktop Runtime → Windows → x64**.
+
+Then press Haptic Settings again; nothing needs restarting. Any version from 10
+upwards works.
+
+To confirm that this is the cause on macOS, the plugin's log says so in plain
+words:
+
+```
+grep -i "settings" ~/Library/Application\ Support/Logi/LogiPluginService/Logs/plugin_logs/ThrumHaptics.log | tail -10
+```
+
+On Windows the same log is at
+`%LOCALAPPDATA%\Logi\LogiPluginService\Logs\plugin_logs\ThrumHaptics.log`. If it
+shows something else, please
+[open an issue](https://github.com/PAAAAAAAAK/thrum-haptics/issues) with those
+lines.
 
 ## Settings
 
@@ -200,6 +259,11 @@ motor hits in Options+.
   types are excluded explicitly. A keyboard hook is the same mechanism a
   keylogger uses and sees every keystroke including passwords; nothing here needs
   keystrokes, so it is never requested on either platform.
+- **Which device, not what you did with it.** To tell devices apart the plugin
+  reads the maker of the device an input came from — on Windows through Raw
+  Input, registered for the mouse only — and on macOS the name of the program
+  when an input was posted by one rather than by hardware. Both are used on the
+  spot and written nowhere but the local log.
 - **No network connections.** Nothing is sent anywhere. The settings window talks
   to the plugin over a local named pipe, which never touches the network stack.
 - **No telemetry, no analytics, no data collection.** Preferences are stored
@@ -220,7 +284,7 @@ it to reload — so the plugin runs straight from your build output. Use
 To package a release, **use the script** rather than calling `pack` by hand:
 
 ```
-./tools/pack-release.ps1 -Version 1.2.0
+./tools/pack-release.ps1 -Version 1.3.0
 ```
 
 It builds each platform from a completely clean tree, nests the macOS output
@@ -249,6 +313,8 @@ The clean tree is not tidiness. Two things go wrong without it:
 - **`ThrumHapticsPlugin`** — the plugin. Targets plain `net10.0` with no desktop
   framework references (see below). `MouseInputSource` handles Windows via
   SharpHook; `MacMouseInputSource` handles macOS via CoreGraphics event taps.
+  `RawInputDeviceTracker` and `MacDeviceFilter` tell Logitech pointers from
+  everything else.
 - **`ThrumHapticsSettings`** — the Windows settings window, a WinForms executable.
 - **`ThrumHapticsSettingsMac`** — the macOS settings window, an Avalonia
   executable. Separate because WinForms cannot run on macOS, and deliberately not
@@ -269,6 +335,15 @@ So macOS ships no native binary of ours at all. `MacMouseInputSource` P/Invokes
 CoreGraphics directly: `CGEventTapCreate` at HID level for mouse and scroll, plus
 a second session-level tap for the navigation gestures Options+ posts in place of
 the thumb buttons. Both are listen-only.
+
+Telling devices apart differs just as much. Windows reports the device on a
+separate channel, Raw Input, which `RawInputDeviceTracker` matches to the hook by
+timing. On macOS every event already carries the id of the service that sent it
+— in an integer field Apple does not document, read through the public
+`CGEventGetIntegerValueField`. Because it is undocumented, `MacDeviceFilter`
+holds nothing back until it has positively identified a Logitech pointer on that
+machine: if the field ever stops meaning what it means today, the plugin falls
+back to its earlier behaviour instead of going silent.
 
 ### Three things that will bite you
 
@@ -302,10 +377,7 @@ a collectible load context. Use the SDK's `AssemblyFilePath` instead.
 - [x] Drag gestures and screen edge
 - [x] Settings window
 - [x] macOS support
-- [ ] Per-device filtering — a trackpad or second mouse currently drives the
-      motor too, because both `WH_MOUSE_LL` and `CGEventTap` deliver input
-      already merged across devices. Fixing it needs device-level input: Raw
-      Input on Windows, `IOHIDManager` on macOS.
+- [x] Per-device filtering — only Logitech pointers drive the motor
 
 ## Licence
 

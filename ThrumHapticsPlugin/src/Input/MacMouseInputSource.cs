@@ -82,12 +82,17 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
         private IntPtr _diagnosticTap;
         private IntPtr _diagnosticRunLoopSource;
 
+        // Which device an event came from. Both taps ask it, and both run on the
+        // one tap thread, so it is shared without a lock.
+        private readonly MacDeviceFilter _devices;
+
         public String Name => "Mouse (macOS)";
 
         public MacMouseInputSource(HapticOutput haptics, HapticSettings settings)
         {
             this._haptics = haptics ?? throw new ArgumentNullException(nameof(haptics));
             this._settings = settings ?? throw new ArgumentNullException(nameof(settings));
+            this._devices = new MacDeviceFilter(this._settings);
         }
 
         // --- CoreGraphics / CoreFoundation ------------------------------------
@@ -552,6 +557,9 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
 
                 PluginLog.Info("[ThrumHaptics] macOS event tap ENABLED - now receiving system-wide mouse events.");
 
+                // Before the run loop starts, so it is settled before the first event.
+                this._devices.Start();
+
                 // Shares this thread's run loop deliberately: one thread, one loop,
                 // two sources. A second thread would buy nothing and would need its
                 // own shutdown path.
@@ -660,6 +668,14 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                     return @event;
                 }
 
+                // Before the scroll bookkeeping below, not after it: another
+                // device's scrolling must not be what makes a thumb press look
+                // like a thumb-wheel roll.
+                if (!this._devices.Allows(type, @event))
+                {
+                    return @event;
+                }
+
                 var now = Environment.TickCount64;
 
                 if (type == EventScrollWheel)
@@ -740,6 +756,15 @@ namespace Loupedeck.ThrumHapticsPlugin.Input
                 {
                     PluginLog.Info($"[ThrumHaptics] Event tap disabled by the OS (type={type}); re-enabling.");
                     CGEventTapEnable(this._tap, true);
+                    return @event;
+                }
+
+                // Another device's input stops HERE, before any of it is counted.
+                // Dropping it only at the moment of playing would still let a
+                // trackpad fill the scroll accumulators and start drags that the
+                // MX Master's next event then finishes.
+                if (!this._devices.Allows(type, @event))
+                {
                     return @event;
                 }
 

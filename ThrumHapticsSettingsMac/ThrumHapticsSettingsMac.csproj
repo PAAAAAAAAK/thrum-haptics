@@ -13,7 +13,21 @@
          when building on Windows (verified: LC_CODE_SIGNATURE is present), which
          matters because Apple Silicon refuses to execute unsigned binaries. -->
     <RuntimeIdentifier>osx-arm64</RuntimeIdentifier>
+
+    <!-- Framework-dependent ON PURPOSE: the .NET runtime is the user's to install,
+         and bundling it would multiply the size of the package.
+
+         This is the one place that choice bites silently. LogiPluginService
+         carries a PRIVATE runtime, so Options+ installs nothing this process can
+         use, and on macOS the .NET host reports a missing runtime on stderr with
+         no dialog. Every machine this was developed on had .NET already, so the
+         settings window simply never opened for the first user who did not - with
+         haptics working fine throughout, since those run inside Logi's process.
+         The plugin now names that case in its log, and the README documents it. -->
     <SelfContained>false</SelfContained>
+
+    <!-- Any .NET from 10 upwards. See the same setting in ThrumHapticsSettings. -->
+    <RollForward>Major</RollForward>
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 

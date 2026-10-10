@@ -54,8 +54,11 @@ namespace ThrumHapticsSettingsMac
             // like a fault rather than a duplicate.
             //
             // Unlike Windows there is no FindWindow to raise the existing window
-            // with, so a second launch exits quietly. Worth revisiting if it proves
-            // annoying in use.
+            // with, so a second copy can only exit. The plugin covers the usual
+            // case before it gets this far: it remembers the process it launched
+            // and asks macOS to bring that forward instead (MacAppActivator). This
+            // guard remains for a copy started some other way, such as a Smart
+            // Action pointing straight at the executable.
             using var singleInstance = new Mutex(true, "ThrumHapticsSettingsMac", out var isFirst);
 
             if (!isFirst)
