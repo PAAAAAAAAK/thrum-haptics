@@ -124,7 +124,8 @@ Each input is asked where it came from, and anything that isn't from a Logitech
 pointer is left alone. A few things worth knowing:
 
 - **Any Logitech pointer counts.** Devices are told apart by maker rather than by
-  model, so if you use two Logitech mice, both drive the motor.
+  model, which is why it works the same over Bluetooth and through a Bolt
+  receiver — and why, if you use two Logitech mice, both drive the motor.
 - **The wheels wait a moment for the other device.** Options+ delivers the
   MX Master's wheels itself rather than as mouse hardware, so they arrive with no
   device attached. They play once the other device has been untouched for a
