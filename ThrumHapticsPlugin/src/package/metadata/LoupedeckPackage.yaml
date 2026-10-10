@@ -20,9 +20,9 @@ pluginFileName: ThrumHapticsPlugin.dll
 
 # Plugin version.
 #
-# 1.2.0 follows the published 1.1.0. The 1.2.x and 1.3.x numbers that appear in
-# this branch's history were local test builds and were never released.
-version: 1.2.0
+# 1.3.0 follows the published 1.2.0. The 1.2.9x and 1.2.10x numbers that appear
+# in this branch's history were local test builds and were never released.
+version: 1.3.0
 
 # Author of the plugin. The author can be a company or an individual developer.
 author: PAAAAAAAAK

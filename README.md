@@ -284,7 +284,7 @@ it to reload — so the plugin runs straight from your build output. Use
 To package a release, **use the script** rather than calling `pack` by hand:
 
 ```
-./tools/pack-release.ps1 -Version 1.2.0
+./tools/pack-release.ps1 -Version 1.3.0
 ```
 
 It builds each platform from a completely clean tree, nests the macOS output

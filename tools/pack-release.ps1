@@ -38,7 +38,7 @@
     passes because the package is structurally fine.
 
 .EXAMPLE
-    ./tools/pack-release.ps1 -Version 1.2.0
+    ./tools/pack-release.ps1 -Version 1.3.0
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Version,
