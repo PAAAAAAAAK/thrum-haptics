@@ -14,8 +14,10 @@ what Options+ sends in their place. That turned out to be an NSEvent gesture,
 which is detectable, and it ships. The table is still correct about what it
 measured. It was the inference that overreached.
 
-Two things below are also superseded by the shipped implementation:
+Three things below are also superseded by the shipped implementation:
 
+- **Device filtering** is implemented, and not through `IOHIDManager`. Every
+  event already says which device sent it — see *The mission*, item 2.
 - **Screen edge** is implemented, per display rather than by bounding box.
 - **Scroll pacing** is a user setting now, not a constant. The line delta is
   accelerated beyond recovery — the same wheel reports ~3 points rolled slowly
@@ -36,6 +38,10 @@ application. The event taps survive sustained use with no OS timeouts.
 **Thumb buttons:** the presses themselves are unreachable (fact 6), but the
 gesture Options+ posts in their place is not. They ship as one combined
 `mouse.thumb` event, off by default — see *The mission*, item 1.
+
+**Device filtering:** added after 1.2.0. Only Logitech pointers drive haptics;
+`MacDeviceFilter` judges each event by the device that sent it — see *The
+mission*, item 2.
 
 **Screen edge:** implemented per display in `MacMouseInputSource.AtWall`, using
 `CGDisplayBounds` over `CGGetActiveDisplayList`. A bounding box of all displays
@@ -170,6 +176,13 @@ it, and element enumeration is blocked too. With it granted, the same call
 returns `kIOReturnSuccess` **alongside a running Options+** — so the device is
 *not* held exclusively, and non-exclusive HID access genuinely works.
 
+One later measurement sits awkwardly beside this and is recorded rather than
+explained away: called from INSIDE the Plugin Service, `IOHIDCheckAccess` reports
+listen access as **granted**. The figures above came from a terminal tool, not
+from the service, and `IOHIDDeviceOpen` was never attempted from inside it. It no
+longer needs to be — device filtering went another way — but "the service cannot
+open HID devices" is an inference from this section, not something it measured.
+
 ---
 
 ## The mission
@@ -203,34 +216,48 @@ two. It ships off by default, because the second filter is a heuristic.
 The lesson worth keeping: "unreachable" was true of the mechanism and false of
 the outcome, and the table's authority made the overreach hard to see.
 
-### 2. IOHIDManager — half the prize is real, and it is the half nobody has
+### 2. Device filtering — SOLVED, and without IOHIDManager
 
-The thumb-button half is gone (fact 6). What survives is the part that was
-always the genuine differentiator:
+`CGEventTap` delivers input merged across every pointing device, so the
+MX Master used to buzz when you used the trackpad. This section used to say the
+way out was `IOHIDManager`, blocked on Input Monitoring. It was not needed.
 
-**Device filtering.** `WH_MOUSE_LL` on Windows and `CGEventTap` on macOS both
-deliver input already merged across every pointing device, so today the
-MX Master buzzes when you use the trackpad. BetterClick Haptics has the same
-flaw, so this is the state of the art rather than a defect of ours.
+**Every hardware event already carries the registry id of the service that sent
+it, in integer field 87 of the CGEvent.** Measured on device, inside the Plugin
+Service, with Options+ running:
 
-`IOHIDManager` solves it, and it **works**: `kIOReturnSuccess`, non-exclusive,
-alongside a running Options+, with reports tagged per device (fact 8). Buttons
-1/2/3, movement and scroll all arrive cleanly on `reportID=2`.
+| Input | What the event carries |
+|---|---|
+| MX Master 4: move, click, drag | sender → "MX Master 4", vendor `0x046D` |
+| MX Master 4: both wheels, thumb-button gesture | no sender; posted by `logioptionsplus_agent` (field 41) |
+| Kensington SlimBlade Pro: movement | sender → the trackball, vendor `0x047D` |
+| Kensington SlimBlade Pro: clicks, scroll | sender → `tbwDKPointer`, its driver's virtual pointer, vendor `0x047D` |
+| Built-in trackpad | sender → "Apple Internal Keyboard / Trackpad", vendor `0x05AC` |
 
-**The blocker is Input Monitoring, which LogiPluginService does not hold.** That
-is the product decision, and it is still open:
+The id resolves through IOKit's registry calls, which are public and need no
+permission. Field 87 agreed with the private `IOHIDEventGetSenderID` on every
+kind of event and was present on a drag where the IOHIDEvent was not, so the
+private calls were dropped. Reading it costs nothing measurable.
 
-- We cannot reliably prompt for it — a background plugin host may be denied
-  silently rather than shown a dialog. **Untested from inside LPS**; testing it
-  needs a build that calls `IOHIDDeviceOpen` there and logs the `IOReturn`.
-- The manual path is ugly: System Settings → Input Monitoring → "+" → browse to
-  `/Applications/Utilities/LogiPluginService.app`.
-- A hybrid degrades gracefully — use IOHIDManager when permitted, fall back to
-  the CGEventTap that works today — at the cost of two input paths and
-  behaviour that differs between users.
+Field 87 is **not documented**. `MacDeviceFilter` therefore engages only once it
+has identified a Logitech pointer as a sender on that machine, and remembers
+that across restarts. If the field ever changes, the plugin behaves as 1.2.0 did.
 
-Device is **VID `0x046D`, PID `0xB042`**, Bluetooth LE. Only one Logitech device
-is present on the test machine, so the MX Master 3 concern is currently moot.
+Two things the trackpad taught, both now in the code:
+
+- **Coasting is not use.** After a two-finger swipe the trackpad sends scroll
+  events for a second or more with nobody touching it. In one ten-second window
+  it sent 2,083 events, of which 788 were momentum scrolling and 708 gestures.
+  Treating all of that as "the trackpad is in use" silenced the first thumb press
+  after every swipe.
+- **Options+ input has to wait for the other device.** The wheels carry no
+  sender, so on their own they play whatever else is going on — including when
+  the thumb wheel reports a point or two of travel without being rolled, which
+  it was measured doing while the trackball was in use. They count once the
+  other device has been
+  untouched for a quarter second, the same rule and number as on Windows.
+
+Not yet tried: a Bolt receiver, and a machine with two Logitech pointers.
 
 ### 3. Unaccelerated scroll detents — untested, possibly free
 
