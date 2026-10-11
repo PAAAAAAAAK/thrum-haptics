@@ -30,6 +30,12 @@
     <!-- Ships inside the plugin package next to the plugin assembly. -->
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 
+    <!-- No debug information in a release build, as in the other two projects.
+         Without this the compiler records the full path of the .pdb it wrote
+         inside the assembly, and that path includes the home folder of whoever
+         built it - which then ships to everyone who installs the plugin. -->
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
+
     <!-- Embedded in the EXE, which is what the taskbar, Alt-Tab and the window
          title bar read. Setting Form.Icon alone would leave the executable itself
          showing the generic .NET application icon.
