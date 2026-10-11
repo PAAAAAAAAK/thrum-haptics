@@ -51,7 +51,7 @@ namespace Loupedeck.ThrumHapticsPlugin.Config
         /// <remarks>
         /// Not a feature gate - these are physically undeliverable there, so a
         /// settings row for one would be a switch wired to nothing. See
-        /// MacMouseInputSource and docs/macos-handoff.md fact 6 for the evidence.
+        /// MacMouseInputSource for the evidence.
         /// </remarks>
         public Boolean WindowsOnly { get; }
 

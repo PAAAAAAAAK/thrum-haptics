@@ -1,6 +1,6 @@
 // Diagnostic probe for the macOS port. Throwaway - not part of the plugin.
 //
-// Answers two of the three open questions in the handoff's mission section 2,
+// Answers two questions about why the thumb buttons never arrive on macOS,
 // without building or changing the plugin:
 //
 //   A. CGGetEventTapList() - every active tap, its owner, location, and whether

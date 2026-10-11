@@ -5,6 +5,9 @@
 # Scratch / session notes
 prompt.txt
 
+# Working notes - kept locally, not published
+docs/macos-handoff.md
+
 # Packaged output - attached to GitHub releases rather than committed
 dist/
 

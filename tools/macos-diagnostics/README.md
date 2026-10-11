@@ -44,7 +44,7 @@ flagging report IDs `0x10` and `0x11` as HID++ short and long.
 
 ## What they established
 
-Recorded in full in `docs/macos-handoff.md`, facts 6–8. In short:
+In short:
 
 - Our event tap is **index 0** — first in the system. No tap anywhere carries
   `OtherMouseDown` in an active mask, so nothing is swallowing the thumb buttons.
